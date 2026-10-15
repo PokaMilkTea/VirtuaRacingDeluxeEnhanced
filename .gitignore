@@ -1,0 +1,22 @@
+# ROMs never go into version control
+/rom/
+*.32x
+*.bin
+
+# Build output and local output from the ROM (traces, screenshots)
+/build/
+/out/
+/deps/
+
+# Files the front ends write: save states hold SH2 SDRAM copied from the ROM, so they are ROM-derived data
+*.gp0
+*.srm
+*.mds
+*.ppm
+vrde.ini
+error.log
+
+.DS_Store
+
+# Files other tools create locally
+AGENTS.md
