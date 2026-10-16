@@ -118,6 +118,12 @@ void hle_set_far_view_tiles(int tiles);
    gives only the near ones. Off (the default), the 68000's models. */
 void hle_set_detailed_opponents(int on);
 
+/* How far to the side the far view keeps the track and what the SH2s leave out, in 256ths
+   of the depth: at least HLE_SIDE_REACH_16_9, twice the depth (the 16:9 picture's edges
+   are at 1.95 times it); more for a wider picture. */
+#define HLE_SIDE_REACH_16_9 512
+void hle_set_side_reach(int reach);
+
 /* How many scenes have been sent so far (counts up by one with each) */
 int hle_scene_count(void);
 

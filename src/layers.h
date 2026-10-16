@@ -13,8 +13,9 @@
 #define LAYERS_HEIGHT 240
 
 /* Plane B drawn wider than the screen, SKY_MARGIN columns more on each side: in a race
-   it is the sky, which smooth motion moves sideways between the game's scroll steps */
-#define SKY_MARGIN 160
+   it is the sky, which smooth motion moves sideways between the game's scroll steps, next
+   to a picture up to 32:9 wide */
+#define SKY_MARGIN 384
 #define SKY_WIDTH  (LAYERS_WIDTH + 2 * SKY_MARGIN)
 
 typedef struct {
@@ -50,6 +51,8 @@ typedef struct {
 	/* In a race picture, which entry of the HUD list drew each pixel, plus 1 (hud_item);
 	   0 for the rest */
 	uint8_t x32_hud_item[LAYERS_HEIGHT][LAYERS_WIDTH];
+	/* The types of the HUD list's entries that drew the frame buffer shown (hud_drawn_types) */
+	uint32_t x32_hud_types;
 } layers_t;
 
 extern layers_t layers;

@@ -784,15 +784,24 @@ void hle_set_far_view_tiles(int tiles)
 	far_view_tiles = tiles;
 }
 
+/* How far to the side the far view looks, in 256ths of the depth (hle_set_side_reach) */
+static int side_reach = HLE_SIDE_REACH_16_9;
+
+void hle_set_side_reach(int reach)
+{
+	settings_version++;
+	side_reach = reach < HLE_SIDE_REACH_16_9 ? HLE_SIDE_REACH_16_9 : reach;
+}
+
 /* Far view: an object whose centre the SH2s leave out (06001F3A) but that is in sight
-   up to the far view's end: inside twice its depth to each side (the 16:9 picture's 1.95),
-   as the track's cells, with a margin for its size */
+   up to the far view's end: within side_reach of its depth to each side, as the track's
+   cells, with a margin for its size */
 #define OBJECT_MARGIN 0x00400000   /* 64, 1024 world units */
 
 static int in_far_view(const matrix_t *matrix)
 {
 	int32_t x = abs(matrix->m[0][3]), z = matrix->m[2][3];
-	return far_view && z > 0 && z < far_view_limit && x < 2 * z + OBJECT_MARGIN;
+	return far_view && z > 0 && z < far_view_limit && x < (int64_t)z * side_reach / 256 + OBJECT_MARGIN;
 }
 static const int32_t light[3] = { 0, -0x40000, 0 };   /* C0000788 */
 
@@ -862,11 +871,11 @@ static vertex_t *slot(geometry_t *g, int n)
 }
 
 /* Far view keeps a vertex up to far_view_limit away, and to the side as long as it is
-   within 4 times its distance (well outside the 16:9 picture, 1.95 times) */
+   within twice side_reach of its distance (4 times for 16:9: well outside the picture) */
 static int outside_far_view(const vertex_t *v)
 {
 	int32_t x = v->x < 0 ? -v->x : v->x;
-	return v->z > far_view_limit || (x > SIDE_LIMIT && x / 4 > v->z);
+	return v->z > far_view_limit || (x > SIDE_LIMIT && (int64_t)x * 128 / side_reach > v->z);
 }
 
 /* C00001EC: 1 if the polygon is rejected outright (a vertex too far to the side or too
@@ -1463,7 +1472,7 @@ static int in_far_window(int record)
 }
 
 /* Whether some of the cell may be in sight: not wholly behind the camera, beyond the far
-   view or outside the sides (twice the distance: the 16:9 picture's 1.95). Its corners are
+   view or outside the sides (side_reach: twice the distance for 16:9). Its corners are
    taken at the car's height; a margin of a cell allows for hills and what stands on the
    cell's edge. */
 static int cell_in_sight(const matrix_t *view, int cell, double ground)
@@ -1478,8 +1487,9 @@ static int cell_in_sight(const matrix_t *view, int cell, double ground)
 		double z = exact_dot3(view->f[2], world) + view->f[2][3];
 		behind += z < -margin;
 		beyond += z > far + margin;
-		left += x < -2 * z - margin;
-		right += x > 2 * z + margin;
+		double reach = side_reach / 256.0 * z;
+		left += x < -reach - margin;
+		right += x > reach + margin;
 	}
 	return behind < 4 && beyond < 4 && left < 4 && right < 4;
 }

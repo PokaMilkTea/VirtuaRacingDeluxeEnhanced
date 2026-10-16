@@ -80,7 +80,7 @@ A Makefile is provided. See [how-to-build.md](docs/how-to-build.md) for how to b
 | 4 | Vertices: floating-point projection (default) / the original integer projection |
 | 5 | Dither: blended (default) / the original dithering |
 | 6 | Framerate: 20 FPS / 30 FPS / 40 FPS / 60 FPS / display refresh rate (default) |
-| 7 | Aspect: 16:9 (default) / the original 4:3 |
+| 7 | Aspect: 16:9 (default) / 21:9 / auto (match window size, up to 32:9) / the original 4:3 |
 | 8 | Far view: extended with haze (default) / extended / original |
 | 9 | Level of detail: off (default) / on (distant opponents use simpler models, as in the original) |
 | O | Save the current emulator state to `vrde.mds` (single slot; overwrites the previous save) |

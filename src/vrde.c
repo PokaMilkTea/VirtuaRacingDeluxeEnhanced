@@ -42,9 +42,10 @@
    at any resolution; key 6 cycles the race's 3D through the 32X's 20 pictures a second
    and moving smoothly at 30, 40 or 60 images a second or at the display's rate (the default:
    interpolated between the game's 20 ticks a second, with exact vertices whatever key 4
-   says); key 7 switches
-   between 16:9 (the default: the race's 3D and sky wider, Hor+, and over the black
-   borders; other screens stay 4:3 in the middle) and the console's 4:3; key 8 cycles the
+   says); key 7 cycles
+   the picture's shape: 16:9 (the default: the race's 3D and sky wider, Hor+, and over the
+   black borders; other screens stay 4:3 in the middle), 21:9 (43:18), the window's (up to
+   32:9; side by side, the right half's) and the console's 4:3; key 8 cycles the
    far view: on with haze (the default: the track twice as far, hle_set_far_view, fading
    into the sky with distance), on, and off; key 9 switches the opponents between all
    detailed (the default: the model and wheels the game gives only the near ones,
@@ -146,8 +147,12 @@ static int smooth = 1;              /* key 6: the race's 3D moving smoothly betw
 #define SMOOTH_40      2               /* two images a tick */
 #define SMOOTH_60      3               /* three: one an emulated frame */
 #define SMOOTH_30      4               /* one every two emulated frames */
-static int widescreen = 1;          /* key 7: a 16:9 picture: the race's 3D and sky wider, and
-                                       over the black borders above and below */
+static int widescreen = 1;          /* key 7: a wider picture (the race's 3D and sky wider, and
+                                       over the black borders above and below), or 4:3: */
+#define ASPECT_4_3   0
+#define ASPECT_16_9  1
+#define ASPECT_21_9  2                 /* 43:18, as 3440x1440 */
+#define ASPECT_AUTO  3                 /* the window's shape (picture_aspect) */
 static int blend_dither = 1;        /* key 5: in a race, the 3D's dithered polygons (shadows,
                                        smoke) drawn half transparent and the sky's dither
                                        blended (skyblend_shader), or both dithered as the original */
@@ -178,7 +183,7 @@ static const setting settings[] = {
 	{ "picodrive_green", &picodrive_green, 3, "the 32X's colours: 0 as the 32X has them, 1 as PicoDrive shows them (priority bit in green)" },
 	{ "blend_dither", &blend_dither, 3, "5: in a race, 1 the dithered shadows, smoke and sky blended, 0 dithered as the original" },
 	{ "smooth", &smooth, 15, "6: the race's 3D moving smoothly between the game's ticks: 1 at the display's rate, 4 at 30 images a second, 2 at 40, 3 at 60, 0 as the game's 20" },
-	{ "widescreen", &widescreen, 3, "7: 1 a 16:9 picture (the race wider), 0 the console's 4:3" },
+	{ "widescreen", &widescreen, 15, "7: the picture: 1 16:9, 2 21:9 (43:18), 3 the window's shape (the race wider), 0 the console's 4:3" },
 	{ "far_view", &far_view, 7, "8: in a race, 1 the track twice as far with haze, 2 without, 0 as far as the original" },
 	{ "detailed_opponents", &detailed_opponents, 3, "9: in a race, 1 every opponent with the near ones' detailed model, 0 the game's simpler ones further away" },
 	{ "far_tiles", &far_tiles, ~0u, "the far view adds track and props up to this many tiles (1024 world units) along the course from the car, and reaches as far (4-16; the original sends 3 ahead)" },
@@ -360,14 +365,34 @@ static const hle_frame_t *hle_visible;
 /* The HLE's image: the 32X frame buffer's size, at native resolution */
 #define HLE_IMAGE_WIDTH  320
 
-/* 16:9 at the console's pixel aspect: 224 lines are 224 * 16/9 / (32/35) = 436 pixels
-   wide, so 58 columns more on each side of the 320 (Hor+: the same scale, more to see) */
-#define WIDESCREEN_SIDE 58
+/* The widest picture: 32:9. Wider windows get black bars. */
+#define WIDEST_ASPECT (32.0 / 9.0)
+#define WIDEST_SIDE   276              /* its sides, as picture_side gives them */
 
-/* Columns added on each side of the console's picture, and the picture's width */
+/* The shape of the area our picture is drawn in (draw): what ASPECT_AUTO follows */
+static double area_aspect = 16.0 / 9.0;
+
+/* The picture's shape on screen (width / height) */
+static double picture_aspect(void)
+{
+	switch (widescreen) {
+	case ASPECT_16_9: return 16.0 / 9.0;
+	case ASPECT_21_9: return 43.0 / 18.0;
+	case ASPECT_AUTO: return area_aspect < WIDEST_ASPECT ? area_aspect : WIDEST_ASPECT;
+	default:          return 4.0 / 3.0;
+	}
+}
+
+/* Columns added on each side of the console's picture (Hor+: the same scale, more to
+   see), and the picture's width. At the console's pixel aspect 224 lines are
+   224 * aspect / (32/35) pixels wide: for 16:9, 436, so 58 columns more on each side of
+   the 320; 133 for 43:18. */
 static int picture_side(void)
 {
-	return widescreen ? WIDESCREEN_SIDE : 0;
+	if (widescreen == ASPECT_4_3)
+		return 0;
+	int side = (int)lround((224 * picture_aspect() / PIXEL_ASPECT - HLE_IMAGE_WIDTH) / 2);
+	return side < 0 ? 0 : side;
 }
 
 static int picture_width(void)
@@ -427,8 +452,12 @@ static void group_hud_items(void)
 		hud_group[k] = last_x[k] < 0 ? HUD_NONE : group_of_span(first_x[k], last_x[k]);
 }
 
-/* Whether this frame's HUD moves to the edges: a race picture in widescreen */
+/* Whether this frame's HUD moves to the edges: a race picture in widescreen, except the
+   screens after a race (RESULT, GAME OVER: HUD entry types 7, 8 and 10), which keep their
+   4:3 layout, as RESULT and the place are separate entries. The race's other words
+   (EXTEND TIME: type 3) move with the HUD as before. */
 static int moving_hud;
+#define AFTER_RACE_TYPES (1u << 7 | 1u << 8 | 1u << 10)
 
 /* How far a HUD group moves, in console pixels */
 static int hud_shift(int group)
@@ -497,6 +526,7 @@ static const char *blit_shader =
 #define STRINGIFY(x) #x
 #define AS_TEXT(x) STRINGIFY(x)   /* not TEXT: Windows headers have one */
 #define SKY_MARGIN_TEXT AS_TEXT(SKY_MARGIN) ".0"
+#define EDGE_REPEAT 32   /* the sides that repeat the picture's edge repeat this many columns */
 
 static const char *composite_shader =
 	"#version 330 core\n"
@@ -519,7 +549,7 @@ static const char *composite_shader =
 	"uniform int side;\n"                        /* columns added on each side (widescreen) */
 	"uniform bool fill_borders;\n"               /* 3D and sky over the black borders too */
 	"uniform ivec2 sky_lines;\n"                 /* plane B's first and last line on screen */
-	"uniform bool wrap_sides;\n"                 /* no race: the sides repeat the picture */
+	"uniform bool wrap_sides;\n"                 /* no race: the sides repeat the picture's edge */
 	"uniform bool move_hud;\n"                   /* the HUD's groups to the picture's edges */
 	"in vec2 uv;\n"
 	"out vec4 color;\n"
@@ -538,6 +568,15 @@ static const char *composite_shader =
 	"  }\n"
 	"  if (line > sky_lines.y) return 2 * sky_lines.y + 1 - line;\n"
 	"  return line;\n"
+	"}\n"
+	"\n"
+	/* a column of the sides that repeat the picture's edge: the outermost
+	   EDGE_REPEAT columns over and over, so that patterns of 8 or 16 pixels (the
+	   title's checks) go on unbroken and what lies further in (a logo) does not show twice */
+	"int repeat_edge(int x) {\n"
+	"  if (x < 0) return " AS_TEXT(EDGE_REPEAT) " - 1 - (-x - 1) % " AS_TEXT(EDGE_REPEAT) ";\n"
+	"  if (x >= " AS_TEXT(HLE_IMAGE_WIDTH) ") return " AS_TEXT(HLE_IMAGE_WIDTH) " - " AS_TEXT(EDGE_REPEAT) " + (x - " AS_TEXT(HLE_IMAGE_WIDTH) ") % " AS_TEXT(EDGE_REPEAT) ";\n"
+	"  return x;\n"
 	"}\n"
 	"\n"
 	/* the HUD group of a pixel (MD_FLAG_HUD_SHIFT: 1 left, 3 right), and the 32X colour */
@@ -569,13 +608,15 @@ static const char *composite_shader =
 	"      return;\n"
 	"    }\n"
 	"  }\n"
-	/* the sides repeat the picture round: a picture wholly of the 32X layer, a line the
-	   frame buffer keeps whole (MD_FLAG_LINE_KEPT: the blinds), or a line outside the 3D
-	   view not filled (the borders while a race starts, the title closing over the demo) */
+	/* the sides repeat the picture's edge: a picture wholly of the 32X layer with a
+	   pattern at the edges (wrap_sides), or, over the 3D, a line the frame buffer keeps
+	   whole (MD_FLAG_LINE_KEPT: the blinds) or a line outside the 3D view not filled (the
+	   borders while a race starts, the title closing over the demo). Without the 3D every
+	   32X line is kept whole, so only wrap_sides counts there. */
 	"  bool line_kept = (texelFetch(md_flags, ivec2(0, pixel.y), 0).r & 8u) != 0u;\n"
 	"  bool outside_3d = pixel.y < hle_lines.x || pixel.y > hle_lines.y;\n"
-	"  if (wrap_sides || line_kept || (use_hle != 0 && outside_3d && !fill_borders))\n"
-	"    pixel.x = (pixel.x + " AS_TEXT(HLE_IMAGE_WIDTH) ") % " AS_TEXT(HLE_IMAGE_WIDTH) ";\n"
+	"  if (wrap_sides || (use_hle != 0 && (line_kept || (outside_3d && !fill_borders))))\n"
+	"    pixel.x = repeat_edge(pixel.x);\n"
 	"  bool inside = pixel.x >= 0 && pixel.x < " AS_TEXT(HLE_IMAGE_WIDTH) ";\n"
 	"  vec3 md = inside ? texelFetch(md_picture, pixel, 0).rgb : vec3(0.0);\n"
 	"  if (use_sky) {\n"
@@ -1291,23 +1332,36 @@ static int check_plane_b(const hle_frame_t *frame)
    only then the sky is moved or blended */
 static int sky_ready;
 
-/* Whether a widescreen picture's sides can repeat the picture, as for a picture wholly
-   of the 32X layer (the title, the SEGA logo): where both edge strips as wide as the
-   sides show the 32X layer on every line. Screens with the Mega Drive layer at the edges
-   (the menus) keep black sides: their panels and text would show twice. */
+/* Whether a widescreen picture's sides can repeat its edges (repeat_edge), as for a
+   picture wholly of the 32X layer with a pattern or plain colour at the edges (the
+   title's checks, the SEGA logo): where both strips of EDGE_REPEAT columns show the 32X
+   layer on every line, the same every PATTERN_PERIOD columns. Screens with the Mega Drive
+   layer at the edges (the menus) keep black sides, their panels and text would show
+   twice; so do pictures with something else at the edges (the big "V.R." as the attract
+   loop starts, whose full stop would show over and over). */
 static int sides_wrap;
+#define PATTERN_PERIOD 16   /* the title's checks: 8 pixels each way */
 
-static int edges_show_32x(void)
+static int edge_shows_32x(int row, int x)
+{
+	int md_is_background = layers.md_index[row][x] == layers.md_background[row];
+	int x32_has_priority = (layers.x32_palette[row][layers.x32_index[row][x]] & 0x8000) != 0;
+	return md_is_background || x32_has_priority;
+}
+
+static int edges_repeat(void)
 {
 	for (int y = 0; y < frame_height(); y++) {
 		int row = core_visible_top + y;
 		if (!layers.x32_shown[row])
 			return 0;
-		for (int i = 0; i < 2 * WIDESCREEN_SIDE; i++) {
-			int x = i < WIDESCREEN_SIDE ? i : LAYERS_WIDTH - 2 * WIDESCREEN_SIDE + i;
-			int md_is_background = layers.md_index[row][x] == layers.md_background[row];
-			int x32_has_priority = (layers.x32_palette[row][layers.x32_index[row][x]] & 0x8000) != 0;
-			if (!md_is_background && !x32_has_priority)
+		const uint8_t *index = layers.x32_index[row];
+		for (int i = 0; i < EDGE_REPEAT; i++) {
+			int left = i, right = LAYERS_WIDTH - EDGE_REPEAT + i;
+			if (!edge_shows_32x(row, left) || !edge_shows_32x(row, right))
+				return 0;
+			if (i + PATTERN_PERIOD < EDGE_REPEAT
+			    && (index[left] != index[left + PATTERN_PERIOD] || index[right] != index[right + PATTERN_PERIOD]))
 				return 0;
 		}
 	}
@@ -1331,7 +1385,8 @@ static void blend_sky(int h)
 
 static void upload_frame(void)
 {
-	moving_hud = widescreen && hle_visible != NULL && hle_visible->command == HLE_RACE_COMMAND;
+	moving_hud = widescreen && hle_visible != NULL && hle_visible->command == HLE_RACE_COMMAND
+		&& (layers.x32_hud_types & AFTER_RACE_TYPES) == 0;
 	group_hud_items();
 	static uint8_t md_flags[LAYERS_HEIGHT][LAYERS_WIDTH];
 	int top = core_visible_top;
@@ -1342,7 +1397,7 @@ static void upload_frame(void)
 		GL_RGB, GL_UNSIGNED_SHORT_5_6_5);
 	upload_rows(UNIT_MD_PICTURE, layers.md_picture[top], LAYERS_WIDTH, w, h, GL_RGB, GL_UNSIGNED_SHORT_5_6_5);
 	sky_ready = hle_visible != NULL && check_plane_b(hle_visible) == 0;
-	sides_wrap = hle_visible == NULL && widescreen && edges_show_32x();
+	sides_wrap = hle_visible == NULL && widescreen && edges_repeat();
 	if (sky_ready) {
 		upload_rows(UNIT_MD_WIDE, layers.md_wide[top], SKY_WIDTH, SKY_WIDTH, h, GL_RGB, GL_UNSIGNED_SHORT_5_6_5);
 		if (blend_dither)
@@ -1438,6 +1493,10 @@ static double scroll_difference(double difference)
    before can stay a little after the next scene (hle_interpolated), and its sky has to
    stay with it. */
 #define SKY_SCROLLS_KEPT 4
+/* The sky moves at most this far (sky_offset_for); plane B as drawn covers it next to the
+   widest picture */
+#define SKY_OFFSET_LIMIT 102
+_Static_assert(SKY_MARGIN >= WIDEST_SIDE + SKY_OFFSET_LIMIT, "plane B drawn too narrow");
 static int sky_scrolls[SKY_SCROLLS_KEPT];
 static int scenes_seen;
 
@@ -1461,9 +1520,8 @@ static double sky_offset_for(const hle_frame_t *frame)
 	int newer = sky_scrolls[frame->scene % SKY_SCROLLS_KEPT];
 	double moved = scroll_difference(newer - older) * frame->camera_t;
 	double offset = scroll_difference(layers.md_wide_scroll - (older + moved));
-	/* beyond what plane B as drawn covers next to a widened picture: not one tick's turn
-	   (at most 65 pixels in a race) */
-	return fabs(offset) < SKY_MARGIN - WIDESCREEN_SIDE ? offset : 0;
+	/* not one tick's turn (at most 65 pixels in a race) */
+	return fabs(offset) < SKY_OFFSET_LIMIT ? offset : 0;
 }
 
 /* With smooth motion at 30, 40 or 60 images a second, the emulated frames each image
@@ -1517,11 +1575,27 @@ static void count_3d_picture(double fraction)
 	}
 }
 
+/* The far view looks as far to the side as the picture shows: 2 times the depth for 16:9
+   (whose edges are at 1.95), more in proportion for a wider picture */
+static void set_side_reach(void)
+{
+	static int reach_set = HLE_SIDE_REACH_16_9;
+	int reach = (int)ceil(HLE_SIDE_REACH_16_9 * picture_width() / 436.0);
+	if (reach < HLE_SIDE_REACH_16_9)
+		reach = HLE_SIDE_REACH_16_9;
+	if (reach != reach_set)
+		hle_set_side_reach(reach_set = reach);
+}
+
 /* One display refresh into a w x h window, `fraction` of a frame after the last
    emulated one */
 static void draw(int w, int h, double fraction)
 {
 	int original_rect[4], composite_rect[4];
+	/* side by side, our picture has the right half */
+	int area_w = view == VIEW_SIDE_BY_SIDE ? w - w / 2 : w;
+	area_aspect = (double)area_w / h;
+	set_side_reach();
 	if (view == VIEW_SIDE_BY_SIDE) {
 		fit(frame_width(), 0, w / 2, h, original_rect);
 		fit(picture_width(), w / 2, w - w / 2, h, composite_rect);
@@ -2034,16 +2108,17 @@ static void update_title(SDL_Window *window, double now)
 	new_emulated_frames = 0;
 }
 
-/* A window width that fits the picture (16:9 or 4:3, key 7) at this height */
+/* A window width that fits the picture (key 7) at this height */
 static int window_width_for(int height)
 {
 	return (int)lround((double)height * picture_width() * PIXEL_ASPECT / 224);
 }
 
-/* Key 9: the window keeps its height and takes the picture's width (not in fullscreen) */
+/* Key 7: the window keeps its height and takes the picture's width (not in fullscreen,
+   nor when the picture takes the window's shape) */
 static void fit_window_width(SDL_Window *window)
 {
-	if (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN)
+	if ((SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) || widescreen == ASPECT_AUTO)
 		return;
 	int window_w, window_h;
 	SDL_GetWindowSize(window, &window_w, &window_h);
@@ -2200,7 +2275,8 @@ static const char *setting_value(int index)
 	case SET_DITHER:     return blend_dither ? "Blended" : "Original";
 	case SET_SMOOTH:     return smooth == SMOOTH_DISPLAY ? "Display" : smooth == SMOOTH_30 ? "30 fps"
 	                          : smooth == SMOOTH_40 ? "40 fps" : smooth == SMOOTH_60 ? "60 fps" : "20 fps";
-	case SET_WIDESCREEN: return widescreen ? "16:9" : "4:3";
+	case SET_WIDESCREEN: return widescreen == ASPECT_16_9 ? "16:9" : widescreen == ASPECT_21_9 ? "21:9"
+	                          : widescreen == ASPECT_AUTO ? "Auto" : "4:3";
 	case SET_FAR_VIEW:   return far_view == FAR_VIEW_HAZE ? "On + haze" : far_view ? "On" : "Off";
 	default:             return detailed_opponents ? "Off" : "On";   /* level of detail: the game's simpler models further away */
 	}
@@ -2246,8 +2322,8 @@ static void change_setting(SDL_Window *window, int index, int step)
 		smooth = orders[(i + 5 + step) % 5];
 		break;
 	}
-	case SET_WIDESCREEN:
-		widescreen = !widescreen;
+	case SET_WIDESCREEN:   /* key 7's order: 16:9, 21:9, the window's, 4:3 */
+		widescreen = (widescreen + 4 + step) % 4;
 		fit_window_width(window);
 		break;
 	case SET_FAR_VIEW:

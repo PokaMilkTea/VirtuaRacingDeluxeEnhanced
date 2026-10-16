@@ -26,4 +26,9 @@ int hud_keep_framebuffer_pixel(int buffer, int line, int x);
    of a 3D line, plus 1; 0 if it is not a HUD pixel */
 int hud_item(int buffer, int line, int x);
 
+/* The types of the HUD list's entries (each entry's first byte) that drew into frame
+   buffer 0 or 1: bit n for type n. The race's HUD uses 1, 2, 4, 6 and 9, EXTEND TIME 3;
+   the screens after a race (RESULT, GAME OVER) 7, 8 and 10. */
+uint32_t hud_drawn_types(int buffer);
+
 #endif

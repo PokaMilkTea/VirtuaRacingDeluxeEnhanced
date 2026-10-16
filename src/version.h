@@ -3,7 +3,7 @@
 #ifndef VRDE_VERSION_H
 #define VRDE_VERSION_H
 
-#define VRDE_VERSION         "1.0.0"
-#define VRDE_VERSION_NUMBERS 1, 0, 0, 0     /* the same, as Windows' FILEVERSION wants it */
+#define VRDE_VERSION         "1.1.0"
+#define VRDE_VERSION_NUMBERS 1, 1, 0, 0     /* the same, as Windows' FILEVERSION wants it */
 
 #endif

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <!-- vrde.exe on Windows: runs as the user (no elevation), for Windows 10 and later -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="VirtuaRacingDeluxeEnhanced.vrde" version="1.0.0.0" processorArchitecture="amd64"/>
+  <assemblyIdentity type="win32" name="VirtuaRacingDeluxeEnhanced.vrde" version="1.1.0.0" processorArchitecture="amd64"/>
   <description>Virtua Racing Deluxe enhanced front end</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>

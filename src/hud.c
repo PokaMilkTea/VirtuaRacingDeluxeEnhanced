@@ -11,6 +11,7 @@
 
 static uint8_t written[2][HUD_FRAMEBUFFER_BYTES];
 static uint8_t written_item[2][HUD_FRAMEBUFFER_BYTES];   /* hud_item's value for each byte */
+static uint32_t drawn_types[2];   /* hud_drawn_types */
 static int target = -1;   /* the buffer the SH2s were writing into */
 
 /* The master reads each entry of the scene's HUD list (16 bytes each) just before it
@@ -19,6 +20,8 @@ static int target = -1;   /* the buffer the SH2s were writing into */
 #define HUD_LIST_END     0x0600CA00
 #define HUD_ENTRY_SIZE   16
 static int current_item;   /* entry + 1 */
+static int current_type;   /* its type, the entry's first byte */
+#define SDRAM_START 0x06000000
 
 /* The SH2s write into the frame buffer not on screen; PicoDrive points p_dram at it
    (Pico32xSwapDRAM). */
@@ -34,6 +37,8 @@ void hud_note_sh2_access(int is_slave, unsigned int address, unsigned int value,
 		return;
 	if (!is_write && address >= HUD_LIST_ADDRESS && address < HUD_LIST_END) {
 		current_item = (address - HUD_LIST_ADDRESS) / HUD_ENTRY_SIZE + 1;
+		uint32_t entry = HUD_LIST_ADDRESS + (current_item - 1) * HUD_ENTRY_SIZE - SDRAM_START;
+		current_type = ((const uint16_t *)Pico32xMem->sdram)[entry / 2] >> 8;
 		return;
 	}
 	if (!is_write || address < FRAMEBUFFER_ADDRESS || address >= FRAMEBUFFER_END)
@@ -45,6 +50,7 @@ void hud_note_sh2_access(int is_slave, unsigned int address, unsigned int value,
 		target = buffer;
 		memset(written[buffer], 0, sizeof(written[buffer]));
 		memset(written_item[buffer], 0, sizeof(written_item[buffer]));
+		drawn_types[buffer] = 0;
 	}
 
 	int overwrite = address >= OVERWRITE_AREA;
@@ -54,6 +60,8 @@ void hud_note_sh2_access(int is_slave, unsigned int address, unsigned int value,
 			continue;   /* transparent: the pixel keeps what was there */
 		written[buffer][(address + i) % HUD_FRAMEBUFFER_BYTES] = byte != 0;
 		written_item[buffer][(address + i) % HUD_FRAMEBUFFER_BYTES] = byte != 0 ? current_item : 0;
+		if (byte != 0 && current_type < 32)
+			drawn_types[buffer] |= 1u << current_type;
 	}
 }
 
@@ -75,6 +83,11 @@ int hud_keep_framebuffer_pixel(int buffer, int line, int x)
 	if (line_start != FIRST_3D_LINE_WORD + WORDS_PER_3D_LINE * line)
 		return 1;
 	return hud_pixel(buffer, (uint32_t)line_start * 2 + x);
+}
+
+uint32_t hud_drawn_types(int buffer)
+{
+	return drawn_types[buffer];
 }
 
 int hud_item(int buffer, int line, int x)

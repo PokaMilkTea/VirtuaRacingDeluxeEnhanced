@@ -118,6 +118,7 @@ static void on_32x_layer(int first_line, int line_count, int screen_offset, int 
 		uint16_t line_start = dram[line];
 		if (mode == X32_PACKED_PIXEL) {
 			decode_packed_line(dram, line_start, layers.x32_index[row]);
+			layers.x32_hud_types = hud_drawn_types(buffer);
 			for (int x = 0; x < LAYERS_WIDTH; x++) {
 				layers.x32_keep[row][x] = hud_keep_framebuffer_pixel(buffer, line, x);
 				layers.x32_hud_item[row][x] = hud_item(buffer, line, x);
