@@ -1,7 +1,7 @@
 /* vrde: the Virtua Racing Deluxe front end (SDL2 + OpenGL 3.3 core), on the PicoDrive
    emulator core. Adapted from the MD version's front end (vrr).
 
-   usage: vrde [-v] [-d N [-t F] [-r R] [-f]] [-l state] [-p frame:keys]... rom.32x
+   usage: vrde [-v] [-d N [-t F] [-r R] [-f]] [-l state] [-p frame:keys]... [-o file] rom.32x
      -v    print the version and exit
      -d    run frames 0..N as fast as possible in a hidden window (input only from -p),
            checking on every frame that our composite of the two layers (layers.c, drawn
@@ -24,6 +24,9 @@
            count from there
      -p    from that frame on, hold these buttons (S A B C U D L R X Y Z, M for Mode;
            "-p 900:" releases everything), as in vrdetrace
+     -o    while playing, write the input to this file as -p arguments, from the first
+           frame (or from the state -l loads): vrdetrace given them plays the same game
+           again, frame for frame. Loading a state while playing ends the record there
 
    The picture: the core draws the Mega Drive layer and lays the 32X layer over it; we keep
    both layers (layers.c) and composite them on the GPU by the same rule. In a race the
@@ -67,10 +70,11 @@
    F = Start, Z/X/C = X/Y/Z (camera views), V = Mode. A game controller works alongside
    (read_controller). 1 to 0 and - change the view (above). O saves the emulator's state to
    vrde.mds, P loads it. Alt+Enter toggles fullscreen. Esc (Back or Guide on a controller)
-   pauses the game and opens a menu with the settings above, saving, loading and quitting,
-   as in the MD version; opening it reads vrde.ini again, so that it can be edited while
-   the game runs. The window's title shows the name, the version and the pictures
-   drawn a second. */
+   pauses the game and opens a menu with the settings above, the analog controls,
+   fullscreen, saving, loading and quitting, as in the MD version; opening it reads vrde.ini
+   again, so that it can be edited while the game runs. The window's title shows the name,
+   the version and the pictures drawn a second. Both of a controller's sticks pressed show
+   the debug info (sizes, frame rates, the analog controls) or hide it again. */
 #include <ctype.h>
 #include <math.h>
 #include <stddef.h>
@@ -90,6 +94,7 @@
 #include "sh2raster.h"
 #include "layers.h"
 #include "settings.h"
+#include "analog.h"
 #include "version.h"
 
 #define TITLE "Virtua Racing Deluxe Enhanced " VRDE_VERSION   /* the window's, and -v's */
@@ -170,6 +175,18 @@ static int far_tiles = 12;          /* vrde.ini only: the far view adds track an
 static int haze_start = 8;          /* vrde.ini only: the haze starts at this depth, in thousands
                                        of world units (the original draws up to about 4), */
 static int haze_end = 10;           /* and hides everything from this one on (haze_end_units) */
+static int debug_info = 0;          /* sizes, frame rates and the analog controls at the top
+                                       left (draw_debug_info): both sticks pressed in turn it on
+                                       and off (toggle_debug_info); not kept in vrde.ini */
+static int fullscreen = 0;          /* the menu's Fullscreen (Alt+Enter), as the player left it:
+                                       the game starts that way (main) */
+static int analog = 1;              /* the menu's Analog control: the left stick steers and
+                                       the triggers press the throttle and the brake by how
+                                       far they go (analog.c), or all three as the buttons */
+static int stick_dead_zone = 8;     /* with analog, the stick's dead zone in percent of its way
+                                       out; within it the D-pad steers */
+static int trigger_dead_zone = 5;   /* and the triggers'; within it the buttons work the pedals */
+#define DEAD_ZONE_MAX 30
 #define TILE_UNITS 1024             /* a tile of the course's grid, in world units */
 #define MSAA_SAMPLES 4              /* fewer if the GL offers fewer */
 
@@ -186,6 +203,10 @@ static const setting settings[] = {
 	{ "widescreen", &widescreen, 15, "7: the picture: 1 16:9, 2 21:9 (43:18), 3 the window's shape (the race wider), 0 the console's 4:3" },
 	{ "far_view", &far_view, 7, "8: in a race, 1 the track twice as far with haze, 2 without, 0 as far as the original" },
 	{ "detailed_opponents", &detailed_opponents, 3, "9: in a race, 1 every opponent with the near ones' detailed model, 0 the game's simpler ones further away" },
+	{ "fullscreen", &fullscreen, 3, "the menu's Fullscreen (Alt+Enter): 1 the game starts fullscreen, 0 in a window" },
+	{ "analog", &analog, 3, "the menu's Analog control: 1 the controller's left stick steers and its triggers press the throttle (right) and the brake (left) by how far they go, 0 all three in the buttons' steps as the original" },
+	{ "stick_dead_zone", &stick_dead_zone, (1u << (DEAD_ZONE_MAX + 1)) - 1, "with analog, the stick's dead zone in percent of its way out (0-30); within it the D-pad steers" },
+	{ "trigger_dead_zone", &trigger_dead_zone, (1u << (DEAD_ZONE_MAX + 1)) - 1, "with analog, the triggers' dead zone in percent (0-30); within it the buttons work the pedals" },
 	{ "far_tiles", &far_tiles, ~0u, "the far view adds track and props up to this many tiles (1024 world units) along the course from the car, and reaches as far (4-16; the original sends 3 ahead)" },
 	{ "haze_start", &haze_start, ~0u, "the haze (far_view 1) starts at this depth, in thousands of world units (0-31; the original draws up to about 4)" },
 	{ "haze_end", &haze_end, ~0u, "... and hides everything from this depth on, in thousands (1-31, at most the far view's end); 0 half a tile before the far view's end" },
@@ -210,11 +231,13 @@ static struct {
 } menu;
 
 #define MENU_COLUMNS 32        /* characters a line */
-#define MENU_LINES   17        /* the title, a gap, 9 settings, a gap, 3 items, a gap, the hint */
+#define MENU_LINES   18        /* the title, a gap, 9 settings, a gap, 5 items, the hint */
 #define CHAR_W       8         /* a character's cell: a 5 x 7 glyph and its outline */
 #define CHAR_H       12
 #define MENU_W       (MENU_COLUMNS * CHAR_W + 16)   /* the panel, 8 pixels of margin all round */
-#define MENU_H       (MENU_LINES * CHAR_H + 16)
+#define MENU_TOP     4         /* margin above and below: the panel then fits 3 times in the
+                                  window as it opens (672 high) */
+#define MENU_H       (MENU_LINES * CHAR_H + 2 * MENU_TOP)
 
 /* vrde's own files (vrde.ini, vrde.mds). On Windows they go beside vrde.exe: started from
    Explorer, say with a ROM dropped on it, the program gets a current directory the player
@@ -294,19 +317,72 @@ static void show_notice(const char *text)
 	notice.until = now_seconds() + NOTICE_SECONDS;
 }
 
+/* The analog controls kept for the replay, beside the state (analog.h) */
+static const char *analog_record_path(const char *state_path)
+{
+	static char path[1100];
+	snprintf(path, sizeof(path), "%s.analog", state_path);
+	return path;
+}
+
 static int save_state(void)
 {
-	int saved = core_save_state(STATE_FILE);
+	int saved = core_save_state(STATE_FILE) && analog_save_record(analog_record_path(STATE_FILE));
 	if (saved)
 		printf("state saved to %s\n", STATE_FILE);
 	show_notice(saved ? "State saved" : "State not saved");
 	return saved;
 }
 
+/* -o: the input as vrdetrace's arguments, one line each time it changes: -p the buttons,
+   -j the stick's steering target, -g and -b the throttle's and the brake's triggers */
+static FILE *input_record;
+static long input_record_frame;            /* the frame about to run, counted as -p counts */
+static int input_recorded_buttons = -1;   /* -1 = nothing written yet */
+static int input_recorded_analog[3];      /* steering, throttle, brake */
+
+static void record_value(int *recorded, int value, char option)
+{
+	if (value != *recorded) {
+		fprintf(input_record, "-%c %ld:%d\n", option, input_record_frame, value);
+		*recorded = value;
+	}
+}
+
+/* Called once per emulated frame, with the buttons and the analog controls it runs with */
+static void record_input(uint16_t buttons, int steering, int throttle, int brake)
+{
+	if (input_record) {
+		if (buttons != input_recorded_buttons) {
+			char letters[16];
+			core_button_letters(buttons, letters);
+			fprintf(input_record, "-p %ld:%s\n", input_record_frame, letters);
+			input_recorded_buttons = buttons;
+		}
+		record_value(&input_recorded_analog[0], steering, 'j');
+		record_value(&input_recorded_analog[1], throttle, 'g');
+		record_value(&input_recorded_analog[2], brake, 'b');
+		fflush(input_record);
+	}
+	input_record_frame++;
+}
+
+static void end_input_record(const char *reason)
+{
+	if (!input_record)
+		return;
+	fprintf(input_record, "# %s at frame %ld: the record ends here\n", reason, input_record_frame);
+	fclose(input_record);
+	input_record = NULL;
+}
+
 static int load_state(const char *path)
 {
 	int loaded = core_load_state(path);
+	if (loaded)
+		end_input_record("a state was loaded");
 	if (loaded) {
+		analog_load_record(analog_record_path(path));
 		hle_reset();
 		printf("state loaded from %s\n", path);
 	}
@@ -1589,6 +1665,8 @@ static void set_side_reach(void)
 
 /* One display refresh into a w x h window, `fraction` of a frame after the last
    emulated one */
+static int drawn_3d_w, drawn_3d_h;   /* the 3D's size in the last picture, 0 without 3D */
+
 static void draw(int w, int h, double fraction)
 {
 	int original_rect[4], composite_rect[4];
@@ -1619,6 +1697,10 @@ static void draw(int w, int h, double fraction)
 			hle_h = composite_rect[3] > HLE_IMAGE_HEIGHT ? composite_rect[3] : HLE_IMAGE_HEIGHT;
 		}
 		hle_draw_colour(hle, hle_w, hle_h, msaa);
+		drawn_3d_w = hle_w;
+		drawn_3d_h = hle_h;
+	} else {
+		drawn_3d_w = drawn_3d_h = 0;
 	}
 
 	glViewport(0, 0, w, h);
@@ -1710,9 +1792,33 @@ static uint16_t read_controller(void)
 	if (axis_pressed(SDL_CONTROLLER_AXIS_LEFTY, 1)) buttons |= 1 << GBTN_DOWN;
 	if (axis_pressed(SDL_CONTROLLER_AXIS_LEFTX, -1)) buttons |= 1 << GBTN_LEFT;
 	if (axis_pressed(SDL_CONTROLLER_AXIS_LEFTX, 1)) buttons |= 1 << GBTN_RIGHT;
-	if (axis_pressed(SDL_CONTROLLER_AXIS_TRIGGERLEFT, 1)) buttons |= 1 << GBTN_A;
-	if (axis_pressed(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 1)) buttons |= 1 << GBTN_B;
+	/* with analog on, the triggers are the pedals only (read_analog): as buttons too, past
+	   their AXIS_PRESSED a trigger would also set off the game's own checks of the buttons */
+	if (!analog && axis_pressed(SDL_CONTROLLER_AXIS_TRIGGERLEFT, 1)) buttons |= 1 << GBTN_A;
+	if (!analog && axis_pressed(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 1)) buttons |= 1 << GBTN_B;
 	return buttons;
+}
+
+/* With analog on, the left stick's steering target and how far the triggers press the
+   throttle (right) and the brake (left), as analog.h has them; 0 = the buttons work it.
+   Kept with the stick's axis for the debug info. */
+static struct {
+	int stick_axis;
+	int steering, throttle, brake;
+} analog_input;
+
+static void read_analog(void)
+{
+	SDL_GameController *pad = controller;
+	analog_input.stick_axis = pad ? SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) : 0;
+	analog_input.steering = analog_input.throttle = analog_input.brake = 0;
+	if (!analog || !pad || menu.wait_for_release)
+		return;
+	analog_input.steering = analog_stick_target(analog_input.stick_axis, stick_dead_zone);
+	analog_input.throttle = analog_trigger_amount(
+		SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT), trigger_dead_zone);
+	analog_input.brake = analog_trigger_amount(
+		SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT), trigger_dead_zone);
 }
 
 /* The keyboard and the controller together */
@@ -2041,6 +2147,8 @@ static int dump(int last, int hle_check_from, int picture_scale, int played_colo
 				picodrive_green = 0;
 				smooth = SMOOTH_DISPLAY;
 				widescreen = 1;
+				set_side_reach();   /* as draw does: the far view's width */
+				hle_set_near_limit(1);
 				hle_set_far_view(far_view = FAR_VIEW_HAZE);
 				hle_set_detailed_opponents(detailed_opponents = 1);
 				upload_frame();
@@ -2088,6 +2196,8 @@ static double measure_refresh(SDL_Window *window)
 /* The window's title: the name, the version, the pictures drawn a second and the game's
    own pictures a second (the 3D pictures drawn in a race, otherwise the frames emulated),
    measured over each second */
+static double title_fps, title_game_fps;   /* the last second's, for draw_debug_info too */
+
 static void update_title(SDL_Window *window, double now)
 {
 	static double since = -1;
@@ -2099,8 +2209,9 @@ static void update_title(SDL_Window *window, double now)
 		return;
 	char title[96];
 	int game_pictures = new_3d_pictures > 0 ? new_3d_pictures : new_emulated_frames;
-	snprintf(title, sizeof(title), TITLE " - %.0f fps (Game %.0f)", pictures / (now - since),
-		game_pictures / (now - since));
+	title_fps = pictures / (now - since);
+	title_game_fps = game_pictures / (now - since);
+	snprintf(title, sizeof(title), TITLE " - %.0f fps (Game %.0f)", title_fps, title_game_fps);
 	SDL_SetWindowTitle(window, title);
 	since = now;
 	pictures = 0;
@@ -2125,14 +2236,50 @@ static void fit_window_width(SDL_Window *window)
 	SDL_SetWindowSize(window, window_width_for(window_h), window_h);
 }
 
-/* Alt+Enter: borderless fullscreen at the desktop's resolution and refresh rate (so the
-   timing stays as it is), or back to the window. The mouse pointer is hidden while
-   fullscreen. */
+/* Under gamescope (SteamOS's game mode) the game is always fullscreen (main): SDL never
+   sees it as fullscreen there (the flag stays off while the window takes the screen's
+   size), so the menu shows it On and greyed instead of offering to switch */
+static int under_gamescope;
+
+/* Borderless fullscreen at the desktop's resolution and refresh rate (so the timing stays
+   as it is), or back to the window. The mouse pointer is hidden while fullscreen. Returns
+   0 if SDL could not switch: the window then stays as it was. */
+static int set_fullscreen(SDL_Window *window, int on)
+{
+	if (SDL_SetWindowFullscreen(window, on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
+		fprintf(stderr, "fullscreen %s: %s\n", on ? "on" : "off", SDL_GetError());
+		return 0;
+	}
+	SDL_ShowCursor(on ? SDL_DISABLE : SDL_ENABLE);
+	return 1;
+}
+
+/* Alt+Enter and the menu: switched by the player, so kept in vrde.ini for the next start */
 static void toggle_fullscreen(SDL_Window *window)
 {
-	int fullscreen = !(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN);
-	SDL_SetWindowFullscreen(window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-	SDL_ShowCursor(fullscreen ? SDL_DISABLE : SDL_ENABLE);
+	int on = !(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN);
+	if (set_fullscreen(window, on)) {
+		fullscreen = on;
+		save_settings();
+	}
+}
+
+/* Each time the picture's size changes: what it is drawn at, the window, the desktop and
+   whether SDL counts the window as fullscreen (under gamescope, SDL may never see the
+   fullscreen it asked for while the size still changes) */
+static void print_size_change(SDL_Window *window, int w, int h)
+{
+	static int last_w, last_h;
+	if (w == last_w && h == last_h)
+		return;
+	last_w = w;
+	last_h = h;
+	int window_w, window_h;
+	SDL_GetWindowSize(window, &window_w, &window_h);
+	SDL_DisplayMode desktop = { 0 };
+	SDL_GetDesktopDisplayMode(SDL_GetWindowDisplayIndex(window), &desktop);
+	fprintf(stderr, "picture %dx%d (window %dx%d, desktop %dx%d, fullscreen %s)\n", w, h, window_w, window_h,
+		desktop.w, desktop.h, SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN ? "yes" : "no");
 }
 
 /* ---- audio ---- */
@@ -2339,10 +2486,11 @@ static void change_setting(SDL_Window *window, int index, int step)
 }
 
 /* The in-game menu, as in the MD version: Esc (Back or Guide on a controller) opens a
-   panel over the paused game with the settings, saving and loading the state, and
+   panel over the paused game with the settings, the analog controls, fullscreen (a
+   controller has no Alt+Enter: SteamOS's game mode), saving and loading the state, and
    quitting. The game's own fonts are compressed in the ROM, so the panel uses a small
    font of our own (menu_font). */
-enum { MENU_SAVE = SET_COUNT, MENU_LOAD, MENU_QUIT, MENU_ITEMS };
+enum { MENU_ANALOG = SET_COUNT, MENU_FULLSCREEN, MENU_SAVE, MENU_LOAD, MENU_QUIT, MENU_ITEMS };
 
 /* Colours, RGBA premultiplied by alpha */
 static const uint8_t MENU_PANEL[4]   = { 8, 12, 30, 230 };
@@ -2408,6 +2556,7 @@ static const struct {
 	{ '+', { 0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00 } },
 	{ '-', { 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00 } },
 	{ '.', { 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C } },
+	{ '%', { 0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03 } },
 	{ GLYPH_CROSS,  { 0x00, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x00 } },   /* PlayStation buttons */
 	{ GLYPH_CIRCLE, { 0x00, 0x0E, 0x11, 0x11, 0x11, 0x0E, 0x00 } },
 };
@@ -2478,21 +2627,28 @@ static const char *menu_hint(void)
 	}
 }
 
-/* The panel: a title, the settings, the state and quitting, and how to use it */
+/* The panel: a title, the settings, the analog controls, fullscreen, the state and
+   quitting, and how to use it */
 static void build_menu_image(void)
 {
 	const char *hint = menu_hint();
 	menu_fill(0, 0, MENU_W, MENU_H, MENU_PANEL);
-	menu_text((MENU_W - CHAR_W * 8) / 2, 8, "SETTINGS", MENU_TITLE);
+	menu_text((MENU_W - CHAR_W * 8) / 2, MENU_TOP, "SETTINGS", MENU_TITLE);
 
 	for (int item = 0; item < MENU_ITEMS; item++) {
 		int line = item < SET_COUNT ? 2 + item : 3 + item;   /* the gaps: see MENU_LINES */
-		int y = 8 + CHAR_H * line;
+		int y = MENU_TOP + CHAR_H * line;
 		const char *value = NULL;
 		char label[MENU_COLUMNS + 1];
 		if (item < SET_COUNT) {
 			snprintf(label, sizeof(label), "[%c] %s", setting_key_names[item], setting_labels[item]);
 			value = setting_value(item);
+		} else if (item == MENU_ANALOG) {
+			strcpy(label, "    Analog control");
+			value = analog ? "On" : "Off";
+		} else if (item == MENU_FULLSCREEN) {
+			strcpy(label, "    Fullscreen");   /* Alt+Enter: no room for it here */
+			value = under_gamescope || SDL_GetWindowFlags(SDL_GL_GetCurrentWindow()) & SDL_WINDOW_FULLSCREEN ? "On" : "Off";
 		} else if (item == MENU_SAVE) {
 			strcpy(label, "[O] Save state");
 		} else if (item == MENU_LOAD) {
@@ -2507,11 +2663,11 @@ static void build_menu_image(void)
 			menu_fill(4, y, MENU_W - 8, CHAR_H, MENU_CURSOR);
 		menu_text(8, y, label, MENU_LABEL);
 		if (value) {
-			int locked = item < SET_COUNT && setting_locked(item);
+			int locked = (item < SET_COUNT && setting_locked(item)) || (item == MENU_FULLSCREEN && under_gamescope);
 			menu_text(8 + CHAR_W * (MENU_COLUMNS - (int)strlen(value)), y, value, locked ? MENU_HINT : MENU_VALUE);
 		}
 	}
-	menu_text((MENU_W - CHAR_W * (int)strlen(hint)) / 2, 8 + CHAR_H * (MENU_LINES - 1), hint, MENU_HINT);
+	menu_text((MENU_W - CHAR_W * (int)strlen(hint)) / 2, MENU_TOP + CHAR_H * (MENU_LINES - 1), hint, MENU_HINT);
 }
 
 /* The open menu over a w x h window, in the middle, at the largest whole scale that fits */
@@ -2536,19 +2692,23 @@ static void draw_menu(int w, int h)
 	glUseProgram(blit_program);
 }
 
-/* The notice (show_notice) at the window's top left, in the menu's letters at the menu's
-   scale, while it lasts and the menu is closed (the menu shows its own) */
-static void draw_notice(int w, int h)
+/* Lines of text at the window's top left from line `first` down, in the menu's letters at
+   the menu's scale */
+static void draw_text_lines(int w, int h, int first, const char *const *lines, int count)
 {
-	if (notice.text == NULL || menu.open || now_seconds() >= notice.until)
-		return;
 	int scale = w / MENU_W < h / MENU_H ? w / MENU_W : h / MENU_H;
 	if (scale < 1)
 		scale = 1;
-	int text_w = CHAR_W * (int)strlen(notice.text), text_h = CHAR_H;
+	int text_w = 0, text_h = CHAR_H * count;
+	for (int i = 0; i < count; i++) {
+		int line_w = CHAR_W * (int)strlen(lines[i]);
+		text_w = line_w > text_w ? line_w : text_w;
+	}
+	text_w = text_w < MENU_W ? text_w : MENU_W;
 	static const uint8_t clear[4] = { 0, 0, 0, 0 };
 	menu_fill(0, 0, text_w, text_h, clear);
-	menu_text(0, 0, notice.text, MENU_TITLE);
+	for (int i = 0; i < count; i++)
+		menu_text(0, CHAR_H * i, lines[i], MENU_TITLE);
 	use_texture_unit(UNIT_MENU);
 	glPixelStorei(GL_UNPACK_ROW_LENGTH, MENU_W);
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, text_w, text_h, GL_RGBA, GL_UNSIGNED_BYTE, menu_image);
@@ -2556,7 +2716,7 @@ static void draw_notice(int w, int h)
 	use_texture_unit(UNIT_CORE_FRAME);
 
 	int margin = 8 * scale;
-	glViewport(margin, h - margin - text_h * scale, text_w * scale, text_h * scale);
+	glViewport(margin, h - margin - (CHAR_H * first + text_h) * scale, text_w * scale, text_h * scale);
 	glUseProgram(menu_program);
 	set_vec2(menu_program, "uv_scale", (float)text_w / MENU_W, (float)text_h / MENU_H);
 	glEnable(GL_BLEND);
@@ -2565,6 +2725,41 @@ static void draw_notice(int w, int h)
 	glDisable(GL_BLEND);
 	set_vec2(menu_program, "uv_scale", 1, 1);
 	glUseProgram(blit_program);
+}
+
+#define DEBUG_LINES 4
+
+/* Debug info: the frame rates as in the title (which a fullscreen game hides), the race's
+   3D resolution (none outside a race), and the analog controls */
+static void draw_debug_info(int w, int h)
+{
+	if (!debug_info)
+		return;
+	char lines[DEBUG_LINES][MENU_COLUMNS + 1];
+	snprintf(lines[0], sizeof(lines[0]), "%.0f fps  game %.0f", title_fps, title_game_fps);
+	if (drawn_3d_w)
+		snprintf(lines[1], sizeof(lines[1]), "resolution %dx%d%s", drawn_3d_w, drawn_3d_h, msaa ? " msaa" : "");
+	else
+		snprintf(lines[1], sizeof(lines[1]), "resolution none");
+	/* the stick (percent of its way, left negative), the target it gives (left positive, 0 =
+	   the D-pad steers) and the car's steering in the same units ($908E / 256); the triggers'
+	   amounts (0 = the buttons) and the car's pedals ($900E, $9010) */
+	const uint16_t *ram = (const uint16_t *)PicoMem.ram;
+	snprintf(lines[2], sizeof(lines[2]), "stick %d%% target %d car %d", analog_input.stick_axis * 100 / 32767,
+		analog_input.steering, (short)ram[0x908E >> 1] / 256);
+	snprintf(lines[3], sizeof(lines[3]), "throttle %d/%d brake %d/%d", analog_input.throttle,
+		(short)ram[0x900E >> 1], analog_input.brake, (short)ram[0x9010 >> 1]);
+	const char *text[DEBUG_LINES] = { lines[0], lines[1], lines[2], lines[3] };
+	draw_text_lines(w, h, 0, text, DEBUG_LINES);
+}
+
+/* The notice (show_notice), while it lasts and the menu is closed (the menu shows its
+   own): below the debug info when that is on */
+static void draw_notice(int w, int h)
+{
+	if (notice.text == NULL || menu.open || now_seconds() >= notice.until)
+		return;
+	draw_text_lines(w, h, debug_info ? DEBUG_LINES : 0, &notice.text, 1);
 }
 
 /* Opening the menu reads vrde.ini again and applies it, so that it can be edited while the
@@ -2597,11 +2792,25 @@ static void move_cursor(int step)
 	menu.status = NULL;
 }
 
+/* Left or right on the selected item: a setting one step back or forward; the analog
+   controls and fullscreen on or off */
+static void change_item(SDL_Window *window, int step)
+{
+	if (menu.selected < SET_COUNT) {
+		change_setting(window, menu.selected, step);
+	} else if (menu.selected == MENU_ANALOG) {
+		analog = !analog;   /* the dead zones are in vrde.ini only */
+		save_settings();
+	} else if (menu.selected == MENU_FULLSCREEN && !under_gamescope) {
+		toggle_fullscreen(window);
+	}
+}
+
 /* Enter or A on the selected item; returns 0 to quit */
 static int confirm_item(SDL_Window *window)
 {
-	if (menu.selected < SET_COUNT)
-		change_setting(window, menu.selected, 1);
+	if (menu.selected < MENU_SAVE)
+		change_item(window, 1);
 	else if (menu.selected == MENU_SAVE)
 		menu.status = save_state() ? "Saved" : "Failed";
 	else if (menu.selected == MENU_LOAD && load_state(STATE_FILE))
@@ -2622,7 +2831,8 @@ static int handle_key(SDL_Window *window, SDL_Scancode key)
 {
 	int alt_held = (SDL_GetModState() & KMOD_ALT) != 0;
 	if ((key == SDL_SCANCODE_RETURN || key == SDL_SCANCODE_KP_ENTER) && alt_held) {
-		toggle_fullscreen(window);
+		if (!under_gamescope)
+			toggle_fullscreen(window);
 		return 1;
 	}
 	if (key == SDL_SCANCODE_ESCAPE) {
@@ -2639,8 +2849,7 @@ static int handle_key(SDL_Window *window, SDL_Scancode key)
 			return 1;
 		case SDL_SCANCODE_LEFT:
 		case SDL_SCANCODE_RIGHT:
-			if (menu.selected < SET_COUNT)
-				change_setting(window, menu.selected, key == SDL_SCANCODE_LEFT ? -1 : 1);
+			change_item(window, key == SDL_SCANCODE_LEFT ? -1 : 1);
 			return 1;
 		case SDL_SCANCODE_RETURN:
 		case SDL_SCANCODE_KP_ENTER:
@@ -2665,8 +2874,21 @@ static int handle_key(SDL_Window *window, SDL_Scancode key)
    moves and changes, the right face button (SDL's B) confirms and the bottom one (A)
    closes, by position, so they do the same on every pad (see the controller map).
    Returns 0 to quit. */
+/* The debug info on or off: as the second of the two sticks goes down while the other is
+   held, in either order; pressing again (one released and down again) turns it back */
+static void toggle_debug_info(void)
+{
+	if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_LEFTSTICK)
+			&& SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_RIGHTSTICK))
+		debug_info = !debug_info;
+}
+
 static int handle_controller_button(SDL_Window *window, int button)
 {
+	if (button == SDL_CONTROLLER_BUTTON_LEFTSTICK || button == SDL_CONTROLLER_BUTTON_RIGHTSTICK) {
+		toggle_debug_info();
+		return 1;
+	}
 	if (button == SDL_CONTROLLER_BUTTON_BACK || button == SDL_CONTROLLER_BUTTON_GUIDE) {
 		set_menu_open(window, !menu.open);
 		return 1;
@@ -2682,8 +2904,7 @@ static int handle_controller_button(SDL_Window *window, int button)
 		break;
 	case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
 	case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-		if (menu.selected < SET_COUNT)
-			change_setting(window, menu.selected, button == SDL_CONTROLLER_BUTTON_DPAD_LEFT ? -1 : 1);
+		change_item(window, button == SDL_CONTROLLER_BUTTON_DPAD_LEFT ? -1 : 1);
 		break;
 	case SDL_CONTROLLER_BUTTON_B:
 		return confirm_item(window);
@@ -2713,7 +2934,7 @@ static int handle_events(SDL_Window *window)
 
 static void print_usage(const char *program)
 {
-	fprintf(stderr, "usage: %s [-v] [-d N [-t F] [-r R] [-f] [-b]] [-l state] [-p frame:keys]... rom.32x\n", program);
+	fprintf(stderr, "usage: %s [-v] [-d N [-t F] [-r R] [-f] [-b]] [-l state] [-p frame:keys]... [-o file] rom.32x\n", program);
 }
 
 /* The OpenGL 3.3 core window (hidden for -d) */
@@ -2760,7 +2981,8 @@ int main(int argc, char **argv)
 #endif
 
 	int option;
-	while ((option = getopt(argc, argv, "bd:fl:p:r:t:v")) != -1) {
+	const char *record_path = NULL;
+	while ((option = getopt(argc, argv, "bd:fl:o:p:r:t:v")) != -1) {
 		char letters[16] = "";
 		if (option == 'v') {
 			puts(TITLE);
@@ -2769,6 +2991,8 @@ int main(int argc, char **argv)
 			dump_frame = atoi(optarg);
 		} else if (option == 'l') {
 			state_path = optarg;
+		} else if (option == 'o') {
+			record_path = optarg;
 		} else if (option == 't') {
 			hle_check_from = atoi(optarg);
 		} else if (option == 'r') {
@@ -2807,6 +3031,7 @@ int main(int argc, char **argv)
 		load_settings();
 	}
 	apply_hle_settings();
+	hle_set_near_limit(!checking);   /* the checks compare with the SH2s' picture */
 
 	SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");   /* face buttons by position */
 	/* Windows: sizes in scaled points and the drawable in real pixels, as on macOS,
@@ -2821,9 +3046,18 @@ int main(int argc, char **argv)
 	SDL_Window *window = open_window(checking);
 	if (!window)
 		return 1;
+	/* Under gamescope (SteamOS's game mode) the window can't be resized: gamescope only
+	   scales it up to the screen. Fullscreen takes gamescope's resolution instead. */
+	under_gamescope = !checking && getenv("GAMESCOPE_WAYLAND_DISPLAY") != NULL;
+	if (under_gamescope)
+		set_fullscreen(window, 1);
 
 	if (core_init(rom, SAMPLE_RATE) != 0)
 		return 1;
+	/* the analog controls in their dead zones leave the game as it is; the checks run without
+	   them */
+	if (!checking)
+		analog_install();
 	layers_init();
 	vrde_comm_write_hook = on_comm_write;
 	vrde_dreq_write_hook = on_dreq_write;
@@ -2837,6 +3071,13 @@ int main(int argc, char **argv)
 		fprintf(stderr, "%s: not a saved state\n", state_path);
 		return 1;
 	}
+	if (record_path && !checking) {
+		input_record = fopen(record_path, "w");
+		if (!input_record) {
+			perror(record_path);
+			return 1;
+		}
+	}
 
 	if (checking) {
 		printf("checking frames 0 to %d\n", dump_frame);
@@ -2847,6 +3088,11 @@ int main(int argc, char **argv)
 	   otherwise by the clock */
 	SDL_GL_SetSwapInterval(1);
 	double hz = measure_refresh(window), fps;
+	/* Fullscreen as the player left it only now: on macOS it moves the window to a Space of
+	   its own with an animation, which the measurement must not see. Borderless, it keeps
+	   the desktop's refresh rate. */
+	if (fullscreen && !under_gamescope)
+		set_fullscreen(window, 1);
 	int frames_per_vsync;
 	if (fabs(hz - NTSC_FPS) < NTSC_FPS * VSYNC_LOCK) {
 		frames_per_vsync = 1;
@@ -2915,7 +3161,11 @@ int main(int argc, char **argv)
 
 		double emulate_start = now_seconds();
 		for (int i = 0; i < frames_to_run; i++) {
-			run_frame(read_pad());
+			uint16_t buttons = read_pad();
+			read_analog();
+			record_input(buttons, analog_input.steering, analog_input.throttle, analog_input.brake);
+			analog_set_input(analog_input.steering, analog_input.throttle, analog_input.brake);
+			run_frame(buttons);
 			frames_emulated++;
 			new_emulated_frames++;
 			queue_audio();
@@ -2926,6 +3176,7 @@ int main(int argc, char **argv)
 		double draw_start = now_seconds();
 		int w, h;
 		SDL_GL_GetDrawableSize(window, &w, &h);
+		print_size_change(window, w, h);
 		/* paused, the picture stays where it was when the menu opened */
 		static double fraction;
 		if (!menu.open)
@@ -2933,6 +3184,7 @@ int main(int argc, char **argv)
 		draw(w, h, fraction);
 		if (menu.open)
 			draw_menu(w, h);
+		draw_debug_info(w, h);
 		draw_notice(w, h);
 		double swap_start = now_seconds();
 		SDL_GL_SwapWindow(window);

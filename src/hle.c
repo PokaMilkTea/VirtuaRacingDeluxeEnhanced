@@ -1300,6 +1300,28 @@ static void detail_opponents(void)
 	}
 }
 
+/* The near plane for the track and the roadside, as the game sets it for its 4:3 picture
+   (0x7000 in the cockpit view). Our wider picture, and the rows above and below the 3D,
+   show the ground right beside the car, closer than that: the near plane cut it away and
+   the Plane B behind showed through (most in the bottom corners of a picture wider than
+   16:9). With the limit on (hle_set_near_limit) it is brought in to at most 0x4000; the
+   checks keep the game's, as the SH2s draw. */
+#define NEAR_LIMIT 0x4000
+static int near_limit;
+
+void hle_set_near_limit(int on)
+{
+	near_limit = on;
+}
+
+static int32_t track_near(void)
+{
+	int32_t near = (int16_t)scene_word(TRACK_NEAR) << 8;
+	if (near_limit && near > NEAR_LIMIT)
+		near = NEAR_LIMIT;
+	return near;
+}
+
 /* 060022B0 / 060022BC */
 static void start_geometry(geometry_t *g, int half)
 {
@@ -1309,7 +1331,7 @@ static void start_geometry(geometry_t *g, int half)
 	g->vertex_shift = 6;
 	g->record_address = half == 0 ? 0x06010000 : 0x06013000;
 	g->record_limit = half == 0 ? 0x06012FEC : 0x06015FEC;
-	set_near(g, (int16_t)scene_word(TRACK_NEAR) << 8);
+	set_near(g, track_near());
 }
 
 /* 06000EB4 */
@@ -1323,7 +1345,7 @@ static void master_geometry(void)
 	set_near(&g, 0x8000);
 	for (int i = 0; i < 15; i += 2)
 		draw_records(&g, OPPONENTS + i * OPPONENT_SIZE, 3);
-	set_near(&g, (int16_t)scene_word(TRACK_NEAR) << 8);
+	set_near(&g, track_near());
 	draw_records(&g, ROADSIDE, 16);
 	draw_model_lists(&g, SIGNS + 2 * RECORD_SIZE, 2);
 }

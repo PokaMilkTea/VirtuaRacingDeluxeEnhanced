@@ -36,6 +36,10 @@ void core_run_frame(uint16_t buttons);
    Exits on an unknown letter. */
 uint16_t core_parse_buttons(const char *letters);
 
+/* The reverse: the letters for these buttons, in the order S A B C U D L R X Y Z M, into
+   letters (at least 13 bytes) */
+void core_button_letters(uint16_t buttons, char *letters);
+
 /* The emulator's whole state to a file, and back. Both return 0 on failure. */
 int core_save_state(const char *path);
 int core_load_state(const char *path);

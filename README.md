@@ -15,6 +15,7 @@ Using high-level emulation (HLE), the 3D scene is reconstructed from data sent b
 - **Widescreen:** Choose between the original 4:3 and an expanded 16:9.
 - **Extended draw distance:** See farther with less scenery pop-in.
 - **In-game menu:** Adjust settings at any time.
+- **Analog controls:** Analog steering, throttle and braking.
 
 <p align="center">
   <img src="docs/images/ingame.png" alt="In game" width="49%">
@@ -85,8 +86,10 @@ A Makefile is provided. See [how-to-build.md](docs/how-to-build.md) for how to b
 | 9 | Level of detail: off (default) / on (distant opponents use simpler models, as in the original) |
 | O | Save the current emulator state to `vrde.mds` (single slot; overwrites the previous save) |
 | P | Load the saved state from `vrde.mds` |
-| Esc | Open the pause menu. Use the arrow keys and Enter to change settings, save or load a state, or quit. Press Esc again to resume |
-| Alt+Enter | Toggle fullscreen (borderless, at the desktop resolution) |
+| Esc | Open the pause menu. Use the arrow keys and Enter to change settings, switch to fullscreen, save or load a state, or quit. Press Esc again to resume |
+| Alt+Enter | Toggle fullscreen (borderless, at the desktop resolution; remembered for the next start) |
+
+Settings can be changed manually by editing the vrde.ini file.
 
 Game controllers are supported, including Xbox, PlayStation, Switch Pro, and other SDL-supported controllers.
 
@@ -94,14 +97,18 @@ Face buttons are mapped by physical position to approximate the Mega Drive six-b
 
 | Xbox | PlayStation | Switch Pro | Maps to |
 |---|---|---|---|
-| D-pad, left stick | same | same | D-pad |
-| X (left), left trigger | □, L2 | Y, ZL | Pad A |
-| A (bottom), right trigger | ✕, R2 | B, ZR | Pad B |
+| D-pad | same | same | D-pad |
+| Left stick | same | same | D-pad; Analog steering |
+| X (left) | □ | Y | Pad A |
+| A (bottom) | ✕ | B | Pad B |
+| Left trigger | L2 | ZL | Analog brake |
+| Right trigger | R2 | ZR | Analog throttle |
 | B (right) | ○ | A | Pad C |
 | LB, RB | L1, R1 | L, R | Six-button pad X, Y |
 | Y (top) | △ | X | Six-button pad Z |
 | Start | Options | + | Start |
 | Back (or Guide) | Share / Create (or PS) | − (or Home) | Menu |
+| Both sticks pressed (L3 + R3) | same | same | Show or hide debug info (frame rate, resolution, analog input) |
 
 In the menu, the right button changes the selected setting and the bottom button closes the menu, whichever controller is used.
 

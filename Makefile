@@ -41,7 +41,7 @@ CORE_CFLAGS = $(CFLAGS) -I$(PICO) $(DEFINES) -Wno-unused -fno-strict-aliasing -M
 OUR_CFLAGS = $(CFLAGS) -I$(PICO) $(DEFINES)
 
 # Our programs: core.c plus the program's own file.
-OUR_COMMON = src/core.c src/core.h $(PICO)/pico/pico.h
+OUR_COMMON = src/core.c src/core.h src/m68kpatch.c src/m68kpatch.h src/analog.c src/analog.h $(PICO)/pico/pico.h
 
 all: build/vrde build/vrdetrace build/sh2dis
 
@@ -73,6 +73,11 @@ build/vrde: $(VRDE_SOURCES) $(VRDE_HEADERS) $(HLE_SOURCES) $(OUR_COMMON) $(CORE_
 # Headless trace tool: per-frame hashes and screenshots.
 build/vrdetrace: src/vrdetrace.c $(HLE_SOURCES) $(OUR_COMMON) $(CORE_OBJECTS)
 	$(CC) $(OUR_CFLAGS) $(filter %.c %.o,$^) -lz -lm -o $@
+
+# A check of the analog controls: the stick and the triggers mapped to the game's values.
+analogtest: tools/analogtest.c src/analog.c src/analog.h src/m68kpatch.c src/m68kpatch.h
+	@mkdir -p build
+	$(CC) $(OUR_CFLAGS) -Isrc tools/analogtest.c src/analog.c src/m68kpatch.c -o build/analogtest && build/analogtest
 
 # SH2 disassembler for research (tools/).
 build/sh2dis: tools/sh2dis.c $(PICO)/cpu/sh2/mame/sh2dasm.c
@@ -132,4 +137,4 @@ clean:
 
 -include $(CORE_OBJECTS:.o=.d) $(WIN_CORE_OBJECTS:.o=.d)
 
-.PHONY: all clean test win win-deps
+.PHONY: analogtest all clean test win win-deps

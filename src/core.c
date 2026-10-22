@@ -212,6 +212,20 @@ uint16_t core_parse_buttons(const char *letters)
 	return buttons;
 }
 
+void core_button_letters(uint16_t buttons, char *letters)
+{
+	static const struct { char letter; int button; } order[] = {
+		{ 'S', GBTN_START }, { 'A', GBTN_A }, { 'B', GBTN_B }, { 'C', GBTN_C },
+		{ 'U', GBTN_UP }, { 'D', GBTN_DOWN }, { 'L', GBTN_LEFT }, { 'R', GBTN_RIGHT },
+		{ 'X', GBTN_X }, { 'Y', GBTN_Y }, { 'Z', GBTN_Z }, { 'M', GBTN_MODE },
+	};
+	for (size_t i = 0; i < sizeof order / sizeof order[0]; i++) {
+		if (buttons & (1 << order[i].button))
+			*letters++ = order[i].letter;
+	}
+	*letters = '\0';
+}
+
 int core_save_state(const char *path)
 {
 	return PicoState(path, 1) == 0;

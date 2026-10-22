@@ -124,6 +124,11 @@ void hle_set_detailed_opponents(int on);
 #define HLE_SIDE_REACH_16_9 512
 void hle_set_side_reach(int reach);
 
+/* On, the track's and the roadside's near plane is at most 0x4000, so that the ground right
+   beside the car, which our wider picture shows, is not cut away; off (the default), the
+   game's, as the SH2s draw */
+void hle_set_near_limit(int on);
+
 /* How many scenes have been sent so far (counts up by one with each) */
 int hle_scene_count(void);
 

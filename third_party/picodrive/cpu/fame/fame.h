@@ -178,6 +178,12 @@ int  fm68k_reset(M68K_CONTEXT *ctx);
 int  fm68k_emulate(M68K_CONTEXT *ctx, int n, fm68k_call_reason reason);
 int  fm68k_would_interrupt(M68K_CONTEXT *ctx); // to be called from fm68k_emulate()
 
+// VRDE: the patch table (src/m68kpatch.c). Before each instruction whose address is in
+// vrde_m68k_patch_low + [0, vrde_m68k_patch_span), the hook is called with that address and
+// returns the address to go on from: the same one runs the 68000's own code. NULL = off.
+extern unsigned int (*vrde_m68k_patch_hook)(M68K_CONTEXT *ctx, unsigned int pc);
+extern unsigned int vrde_m68k_patch_low, vrde_m68k_patch_span;
+
 u32 fm68k_get_pc(const M68K_CONTEXT *ctx);
 
 // PICODRIVE_HACK

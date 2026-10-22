@@ -8,8 +8,25 @@
    and 32X frame buffers (-d), for studying what the game hands to the 3D renderer.
 
    usage: vrdetrace [-n frames] [-p frame:keys]... [-w frame]... [-c frame] [-a start:end]...
-                    [-m start:end]... [-s percent] [-d frame]... [-v frame]... [-h frame] rom.32x
+                    [-m start:end]... [-s percent] [-d frame]... [-v frame]... [-h frame] [-r frame:file] [-j frame:target]... [-g frame:amount]...
+                    [-b frame:amount]... [-k frame]... [-x] [-l state] rom.32x
      -n  number of frames to run (default 600)
+     -r  from that frame on ("-r frame:file"), play the race the file holds instead of -p:
+         one byte per tick as the game keeps them for its replay (from $FFC9A0). Each frame
+         the buttons are those of the tick the game records next ($FFC8C0 says which), so
+         ticks of 2 or 4 frames don't shift the input
+     -j  from that frame on ("-j frame:target"), the stick for analog steering (src/analog.c)
+         at this target, -127 (right) to 127 (left); 0 = in its dead zone, the pad steers
+     -g  from that frame on ("-g frame:amount"), the throttle's trigger pressed this far, 1 to
+         255; 0 = in its dead zone, the B button works the throttle
+     -b  the same for the brake's trigger (the A button). Any -j, -g or -b turns the analog
+         controls on, as vrde's analog setting does
+     -k  after that frame, save the state as state_NNNNNN.mds, with the analog controls kept
+         for the replay in state_NNNNNN.mds.analog (as vrde's key O)
+     -x  the steering's target and the pedals computed in C (src/analog.c) through the patch
+         table, instead of by the 68000: to check the patch table against the game's own code
+     -l  start from a saved state (vrde's key O writes one to vrde.mds); frames and -p count
+         from there. The analog controls for the replay come from state.analog if it exists
      -p  from that frame on, hold these buttons: any of S A B C U D L R X Y Z, and M for
          Mode (S = Start, U/D/L/R = up/down/left/right). "-p 900:" releases everything.
      -w  after that frame, save the picture as frame_NNNNNN.ppm
@@ -80,8 +97,9 @@
 #include "hlecheck.h"
 #include "hud.h"
 #include "sh2raster.h"
+#include "analog.h"
 
-#define MAX_SCRIPT_ENTRIES 256
+#define MAX_SCRIPT_ENTRIES 16384   /* a whole race played by hand (vrde -o) */
 
 /* -p: from frame `frame` on, hold `buttons` */
 struct button_change {
@@ -261,6 +279,46 @@ static void print_ram_ranges(int frame)
 			printf(" %04x", words[a >> 1]);
 		printf("\n");
 	}
+}
+
+/* -r: a race played from the game's own replay record */
+#define REPLAY_BUFFER 0xC9A0      /* the first tick's byte */
+#define REPLAY_POINTER 0xC8C0     /* the next tick's byte, while racing and in the replay */
+static unsigned char replay_record[0x10000];
+static long replay_record_length;
+
+static void read_replay_record(const char *path)
+{
+	FILE *file = fopen(path, "rb");
+	if (!file) {
+		perror(path);
+		exit(1);
+	}
+	replay_record_length = (long)fread(replay_record, 1, sizeof replay_record, file);
+	fclose(file);
+}
+
+/* The buttons that make the game record this tick's byte again, with the default button
+   setup: left (bit 2), right (3), B (4, the throttle) and A (6) held, up (0) and down (1)
+   newly pressed. In a race the pad is read once per tick, just before the byte is
+   recorded (884D1E), so "newly" means since the last tick: holding up or down for the
+   whole tick is enough. -1 outside the record: the -p buttons then. */
+static int replay_record_buttons(void)
+{
+	const uint16_t *words = (const uint16_t *)PicoMem.ram;
+	unsigned int pointer = words[REPLAY_POINTER >> 1];
+	long tick = (long)pointer - REPLAY_BUFFER;
+	if (tick < 0 || tick >= replay_record_length)
+		return -1;
+	unsigned char byte = replay_record[tick];
+	uint16_t buttons = 0;
+	if (byte & 0x04) buttons |= core_parse_buttons("L");
+	if (byte & 0x08) buttons |= core_parse_buttons("R");
+	if (byte & 0x10) buttons |= core_parse_buttons("B");
+	if (byte & 0x40) buttons |= core_parse_buttons("A");
+	if (byte & 0x01) buttons |= core_parse_buttons("U");
+	if (byte & 0x02) buttons |= core_parse_buttons("D");
+	return buttons;
 }
 
 #define MAX_ACCESS_RANGES 8
@@ -605,6 +663,16 @@ static void save_vdp_state(int frame)
 	fclose(file);
 }
 
+/* -k: the state and the analog controls kept for the replay, as vrde's key O */
+static void save_state(int frame)
+{
+	char path[64], record_path[80];
+	snprintf(path, sizeof(path), "state_%06d.mds", frame);
+	snprintf(record_path, sizeof(record_path), "%s.analog", path);
+	if (!core_save_state(path) || !analog_save_record(record_path))
+		fprintf(stderr, "%s: not saved\n", path);
+}
+
 /* ---- Command line ---- */
 
 /* Parses "-p frame:keys". Exits on a malformed argument. */
@@ -623,7 +691,7 @@ static struct button_change parse_button_change(const char *argument)
 static void print_usage(const char *program)
 {
 	fprintf(stderr, "usage: %s [-n frames] [-p frame:keys]... [-w frame]... [-c frame] [-a start:end]..."
-		" [-m start:end]... [-s percent] [-d frame]... [-v frame]... [-h frame] rom.32x\n", program);
+		" [-m start:end]... [-s percent] [-d frame]... [-v frame]... [-h frame] [-r frame:file] [-j frame:target]... [-g frame:amount]... [-b frame:amount]... [-k frame]... [-x] [-l state] rom.32x\n", program);
 }
 
 static int list_contains(const int *list, int count, int value)
@@ -649,9 +717,18 @@ int main(int argc, char **argv)
 	int first_logged_frame = -1;   /* -1 = no traffic log */
 	int first_checked_frame = -1;  /* -1 = no HLE check */
 	int sh2_percent = 100;
+	const char *state_path = NULL;
+	int replay_record_from = -1;   /* -1 = no -r */
+	int pad_in_c = 0;
+	/* -j, -g, -b: the analog controls from a frame on */
+	struct { int frame, value; char control; } analog_changes[MAX_SCRIPT_ENTRIES];
+	int analog_change_count = 0;
+	int steering = 0, throttle = 0, brake = 0;
+	int state_frames[MAX_SCRIPT_ENTRIES];
+	int state_count = 0;
 
 	int option;
-	while ((option = getopt(argc, argv, "n:p:w:c:a:m:s:d:v:h:")) != -1) {
+	while ((option = getopt(argc, argv, "n:p:w:c:a:m:s:d:v:h:l:r:xj:g:b:k:")) != -1) {
 		if (option == 'n') {
 			frame_count = atoi(optarg);
 		} else if (option == 'p' && script_length < MAX_SCRIPT_ENTRIES) {
@@ -687,6 +764,29 @@ int main(int argc, char **argv)
 			dump_count++;
 		} else if (option == 'h') {
 			first_checked_frame = atoi(optarg);
+		} else if (option == 'l') {
+			state_path = optarg;
+		} else if (option == 'x') {
+			pad_in_c = 1;
+		} else if ((option == 'j' || option == 'g' || option == 'b') && analog_change_count < MAX_SCRIPT_ENTRIES) {
+			if (sscanf(optarg, "%d:%d", &analog_changes[analog_change_count].frame,
+					&analog_changes[analog_change_count].value) != 2) {
+				print_usage(argv[0]);
+				return 1;
+			}
+			analog_changes[analog_change_count].control = (char)option;
+			analog_change_count++;
+		} else if (option == 'k' && state_count < MAX_SCRIPT_ENTRIES) {
+			state_frames[state_count] = atoi(optarg);
+			state_count++;
+		} else if (option == 'r') {
+			char *colon = strchr(optarg, ':');
+			if (!colon) {
+				print_usage(argv[0]);
+				return 1;
+			}
+			replay_record_from = atoi(optarg);
+			read_replay_record(colon + 1);
 		} else if (option == 'v' && vdp_count < MAX_SCRIPT_ENTRIES) {
 			vdp_frames[vdp_count] = atoi(optarg);
 			vdp_count++;
@@ -707,12 +807,46 @@ int main(int argc, char **argv)
 		int hz = (int)((double)PICO_MSH2_HZ * sh2_percent / 100);
 		Pico32xSetClocks(hz, hz);
 	}
+	if (pad_in_c)
+		analog_install_c_pad();
+	if (analog_change_count > 0)
+		analog_install();
+	/* As in vrde: the core finishes starting up in its first frame, and a state loaded
+	   before that crashes it. */
+	if (state_path) {
+		core_run_frame(0);
+		if (!core_load_state(state_path)) {
+			fprintf(stderr, "%s: not a saved state\n", state_path);
+			return 1;
+		}
+		char record_path[1024];
+		snprintf(record_path, sizeof(record_path), "%s.analog", state_path);
+		analog_load_record(record_path);
+	}
 
 	uint16_t buttons = 0;
 	for (current_frame = 0; current_frame < frame_count; current_frame++) {
 		for (int i = 0; i < script_length; i++) {
 			if (script[i].frame == current_frame)
 				buttons = script[i].buttons;
+		}
+		for (int i = 0; i < analog_change_count; i++) {
+			if (analog_changes[i].frame != current_frame)
+				continue;
+			int value = analog_changes[i].value;
+			if (analog_changes[i].control == 'j')
+				steering = value;
+			else if (analog_changes[i].control == 'g')
+				throttle = value;
+			else
+				brake = value;
+			analog_set_input(steering, throttle, brake);
+		}
+		uint16_t pressed = buttons;
+		if (replay_record_from >= 0 && current_frame >= replay_record_from) {
+			int recorded = replay_record_buttons();
+			if (recorded >= 0)
+				pressed = recorded;
 		}
 
 		int logging = first_logged_frame >= 0 && current_frame >= first_logged_frame;
@@ -724,7 +858,7 @@ int main(int argc, char **argv)
 		int logging_accesses = logging && access_range_count > 0;
 		vrde_sh2_access_hook = logging_accesses || checking_hle ? on_sh2_access : NULL;
 
-		core_run_frame(buttons);
+		core_run_frame(pressed);
 
 		if (logging) {
 			print_dreq_block();
@@ -743,6 +877,8 @@ int main(int argc, char **argv)
 			save_screenshot(current_frame);
 		if (list_contains(dump_frames, dump_count, current_frame))
 			save_32x_memory(current_frame);
+		if (list_contains(state_frames, state_count, current_frame))
+			save_state(current_frame);
 		if (list_contains(vdp_frames, vdp_count, current_frame))
 			save_vdp_state(current_frame);
 	}

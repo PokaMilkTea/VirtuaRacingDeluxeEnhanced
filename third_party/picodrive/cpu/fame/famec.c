@@ -254,8 +254,16 @@
 
 #else
 
+// VRDE: the patch table's check before each instruction (see fame.h)
 #define NEXT \
     do { \
+        if (vrde_m68k_patch_hook && GET_PC - vrde_m68k_patch_low < vrde_m68k_patch_span) { \
+            u32 vrde_pc = GET_PC, vrde_next_pc = vrde_m68k_patch_hook(ctx, vrde_pc); \
+            if (vrde_next_pc != vrde_pc) { \
+                SET_PC(vrde_next_pc); \
+                continue; \
+            } \
+        } \
         FETCH_WORD(Opcode); \
         JumpTable[Opcode](ctx); \
     } while (ctx->io_cycle_counter > 0);
@@ -516,6 +524,10 @@
 
 // global variable
 ///////////////////
+
+// VRDE: the patch table (see fame.h)
+unsigned int (*vrde_m68k_patch_hook)(M68K_CONTEXT *ctx, unsigned int pc);
+unsigned int vrde_m68k_patch_low, vrde_m68k_patch_span;
 
 static u32 initialised = 0;
 

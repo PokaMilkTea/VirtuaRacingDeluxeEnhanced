@@ -12,6 +12,7 @@
 *.gp0
 *.srm
 *.mds
+*.mds.analog
 *.ppm
 vrde.ini
 error.log
