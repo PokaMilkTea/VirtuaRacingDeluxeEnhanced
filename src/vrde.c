@@ -1,8 +1,10 @@
 /* vrde: the Virtua Racing Deluxe front end (SDL2 + OpenGL 3.3 core), on the PicoDrive
    emulator core. Adapted from the MD version's front end (vrr).
 
-   usage: vrde [-v] [-d N [-t F] [-r R] [-f]] [-l state] [-p frame:keys]... [-o file] rom.32x
+   usage: vrde [-v] [-g] [-d N [-t F] [-r R] [-f]] [-l state] [-p frame:keys]... [-o file] rom.32x
      -v    print the version and exit
+     -g    while playing, key G writes what is on screen into a folder for a bug report
+           (debug_capture); off without it, so that a stray G writes nothing
      -d    run frames 0..N as fast as possible in a hidden window (input only from -p),
            checking on every frame that our composite of the two layers (layers.c, drawn
            by the GPU) is exactly the core's frame. Frame N is written as the core drew it
@@ -53,7 +55,7 @@
    into the sky with distance), on, and off; key 9 switches the opponents between all
    detailed (the default: the model and wheels the game gives only the near ones,
    hle_set_detailed_opponents) and the game's simpler models further away.
-   All are kept in vrde.ini (in the current directory, on Windows beside vrde.exe).
+   All are kept in vrde.ini (beside vrde on Windows and macOS, elsewhere in the current directory).
 
    Timing: when the display runs within 0.8% of 59.92 Hz the emulator does one frame per
    vsync, of twice that one frame every second vsync; otherwise it falls back to the
@@ -72,7 +74,8 @@
    vrde.mds, P loads it. Alt+Enter toggles fullscreen. Esc (Back or Guide on a controller)
    pauses the game and opens a menu with the settings above, the analog controls,
    fullscreen, saving, loading and quitting, as in the MD version; opening it reads vrde.ini
-   again, so that it can be edited while the game runs. The window's title shows the name,
+   again, so that it can be edited while the game runs. With -g, G writes what is on screen
+   into a folder for a bug report (debug_capture). The window's title shows the name,
    the version and the pictures drawn a second. Both of a controller's sticks pressed show
    the debug info (sizes, frame rates, the analog controls) or hide it again. */
 #include <ctype.h>
@@ -82,6 +85,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <SDL.h>
 
 #include "pico/pico_int.h"
@@ -96,6 +100,23 @@
 #include "settings.h"
 #include "analog.h"
 #include "version.h"
+#ifdef _WIN32
+#include <direct.h>
+#define make_folder(path) _mkdir(path)
+#else
+#include <sys/stat.h>
+#define make_folder(path) mkdir(path, 0755)
+#endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <sys/sysctl.h>
+#endif
+#ifdef _WIN32
+#define process_environment _environ
+#else
+extern char **environ;
+#define process_environment environ
+#endif
 
 #define TITLE "Virtua Racing Deluxe Enhanced " VRDE_VERSION   /* the window's, and -v's */
 
@@ -239,15 +260,15 @@ static struct {
                                   window as it opens (672 high) */
 #define MENU_H       (MENU_LINES * CHAR_H + 2 * MENU_TOP)
 
-/* vrde's own files (vrde.ini, vrde.mds). On Windows they go beside vrde.exe: started from
-   Explorer, say with a ROM dropped on it, the program gets a current directory the player
-   never chose. Elsewhere they go to the current directory. The path is in a buffer that
-   the next call reuses. */
+/* vrde's own files (vrde.ini, vrde.mds). On Windows and macOS they go beside vrde: started
+   from Explorer (say with a ROM dropped on it) or double-clicked in the Finder, the program
+   gets a current directory the player never chose, the home folder on macOS. Elsewhere
+   they go to the current directory. The path is in a buffer that the next call reuses. */
 static const char *data_path(const char *name)
 {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
 	static char path[1024];
-	char *base = SDL_GetBasePath();       /* the folder of vrde.exe, ending in a separator */
+	char *base = SDL_GetBasePath();       /* the folder of vrde, ending in a separator */
 	snprintf(path, sizeof(path), "%s%s", base ? base : "", name);
 	SDL_free(base);
 	return path;
@@ -1146,8 +1167,16 @@ static int hud_polygon_shift(const hle_polygon_t *polygon)
 	return hud_shift(group_of_span(anchor, anchor));
 }
 
+/* How far exact polygons are pushed out (console pixels) in an image w pixels wide */
+static float expand_for_width(int w)
+{
+	return fminf(EXPAND / ((float)w / picture_width()), EXPAND_MOST);
+}
+
 /* The polygon list as triangles for the GPU, exact polygons pushed out by `expand` console
    pixels; returns the number of vertices */
+static hle_vertex_t hle_vertices[HLE_MAX_POLYGONS * 18];   /* up to 8 corners: 6 triangles */
+
 static int hle_triangles(const hle_frame_t *frame, hle_vertex_t *vertices, float expand)
 {
 	int count = 0;
@@ -1195,9 +1224,8 @@ static int fills_borders(const hle_frame_t *frame)
    race, scaled), or all rows when filling the borders */
 static void hle_draw(const hle_frame_t *frame, GLuint program, int w, int h)
 {
-	static hle_vertex_t vertices[HLE_MAX_POLYGONS * 18];   /* up to 8 corners: 6 triangles */
 	float scale_x = (float)w / picture_width(), scale_y = (float)h / HLE_IMAGE_HEIGHT;
-	int count = hle_triangles(frame, vertices, fminf(EXPAND / scale_x, EXPAND_MOST));
+	int count = hle_triangles(frame, hle_vertices, expand_for_width(w));
 
 	glViewport(0, 0, w, h);
 	glEnable(GL_SCISSOR_TEST);
@@ -1221,7 +1249,7 @@ static void hle_draw(const hle_frame_t *frame, GLuint program, int w, int h)
 	set_float(program, "side", (float)picture_side());
 	glBindVertexArray(hle_vao);
 	glBindBuffer(GL_ARRAY_BUFFER, hle_vertex_buffer);
-	glBufferData(GL_ARRAY_BUFFER, count * sizeof(hle_vertex_t), vertices, GL_STREAM_DRAW);
+	glBufferData(GL_ARRAY_BUFFER, count * sizeof(hle_vertex_t), hle_vertices, GL_STREAM_DRAW);
 	glDrawArrays(GL_TRIANGLES, 0, count);
 
 	glDisable(GL_SCISSOR_TEST);
@@ -1666,6 +1694,7 @@ static void set_side_reach(void)
 /* One display refresh into a w x h window, `fraction` of a frame after the last
    emulated one */
 static int drawn_3d_w, drawn_3d_h;   /* the 3D's size in the last picture, 0 without 3D */
+static const hle_frame_t *drawn_hle; /* the 3D in the last picture, NULL without */
 
 static void draw(int w, int h, double fraction)
 {
@@ -1688,6 +1717,7 @@ static void draw(int w, int h, double fraction)
 		hle = hle_to_draw(fraction, &sky_offset);
 	if (hle && !menu.open)
 		count_3d_picture(fraction);
+	drawn_hle = hle;
 	if (hle) {
 		/* the 3D at the chosen resolution, or the picture's size on screen (at least the
 		   console's) */
@@ -2051,6 +2081,21 @@ static long count_seams(int w, int h, int view_top, int view_bottom)
 	return seams;
 }
 
+/* RGBA pixels as glReadPixels gives them (rows bottom-up) into a PPM file; returns 0 when
+   it cannot be written */
+static int write_ppm(const char *path, int w, int h, const unsigned char *rgba)
+{
+	FILE *file = fopen(path, "wb");
+	if (!file)
+		return 0;
+	fprintf(file, "P6\n%d %d\n255\n", w, h);
+	for (int y = h - 1; y >= 0; y--)
+		for (int x = 0; x < w; x++)
+			fwrite(rgba + ((size_t)y * w + x) * 4, 1, 3, file);
+	fclose(file);
+	return 1;
+}
+
 /* -d: the composite with the HLE's 3D at `scale` times the console's resolution (with
    MSAA above 1x), as a w x h picture, written to path */
 static void write_hle_picture(const char *path, int scale)
@@ -2070,15 +2115,8 @@ static void write_hle_picture(const char *path, int scale)
 
 	unsigned char *rgba = malloc((size_t)w * h * 4);
 	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-	FILE *file = fopen(path, "wb");
-	if (file) {
-		fprintf(file, "P6\n%d %d\n255\n", w, h);
-		for (int y = h - 1; y >= 0; y--)          /* GL rows are bottom-up */
-			for (int x = 0; x < w; x++)
-				fwrite(rgba + ((size_t)y * w + x) * 4, 1, 3, file);
-		fclose(file);
+	if (write_ppm(path, w, h, rgba))
 		printf("wrote %s (%dx%d)\n", path, w, h);
-	}
 	free(rgba);
 	glBindFramebuffer(GL_FRAMEBUFFER, previous_framebuffer);
 	glDeleteFramebuffers(1, &framebuffer);
@@ -2762,6 +2800,307 @@ static void draw_notice(int w, int h)
 	draw_text_lines(w, h, debug_info ? DEBUG_LINES : 0, &notice.text, 1);
 }
 
+/* ---- debug capture (key G) ---- */
+
+/* Key G (with -g) writes what a player sees going wrong into a new folder, vrde-debug-NNNNNN (the
+   frames emulated; -2, -3, ... after it if taken) beside vrde.ini, for a bug report: the picture on screen, the SH2s' own
+   picture (the core's frame), the HLE's 3D as the GPU drew it, the triangles it was given
+   and the polygons they came from, the same for the game's newest tick without smooth
+   motion, the pacing of the last refreshes, and the system, display, timing and settings.
+   Measured against the SH2s' picture
+   and each other, they tell whether the vertices went wrong (on the CPU: the SH2s'
+   integers, the exact ones, or smooth motion) or the GPU drew good ones wrongly. */
+static int debug_capture_key;       /* -g: key G takes a capture */
+static int debug_capture_requested;
+static double display_hz;          /* main's measurement at start */
+static const char *pacing = "";    /* main's choice: one frame per vsync, ... */
+
+/* The last refreshes, about 4 seconds at 60 Hz: how the pictures before the capture were
+   paced, and which scenes and camera_t they drew (smooth motion going wrong when the
+   frame rate falls would show here) */
+#define PACE_HISTORY 240
+typedef struct {
+	double time;          /* seconds, as now_seconds */
+	double interval;      /* since the refresh before */
+	int frames_run;       /* frames emulated just before this refresh */
+	double fraction;      /* how far into the next frame it was drawn */
+	long frame;           /* frames emulated so far */
+	int visible_scene;    /* the SH2s' picture on screen (hle_visible), -1 without */
+	int drawn_scene;      /* the 3D drawn (with smooth motion its newer scene), -1 without */
+	double camera_t;      /* the 3D drawn's, -1 without */
+} pace_t;
+static pace_t pace_history[PACE_HISTORY];
+static long pace_count;   /* refreshes remembered: the newest at (pace_count - 1) % PACE_HISTORY */
+
+static void remember_pace(double interval, int frames_run, double fraction)
+{
+	int i = pace_count++ % PACE_HISTORY;
+	pace_history[i].time = now_seconds();
+	pace_history[i].interval = interval;
+	pace_history[i].frames_run = frames_run;
+	pace_history[i].fraction = fraction;
+	pace_history[i].frame = emulated_frames;
+	pace_history[i].visible_scene = hle_visible ? hle_visible->scene : -1;
+	pace_history[i].drawn_scene = drawn_hle ? drawn_hle->scene : -1;
+	pace_history[i].camera_t = drawn_hle ? drawn_hle->camera_t : -1;
+}
+
+/* The remembered refreshes, oldest first */
+static void write_pace(const char *path)
+{
+	FILE *file = fopen(path, "w");
+	if (!file)
+		return;
+	fprintf(file, "# the last %ld refreshes, oldest first: time (s, from the first), interval (ms), frames run, "
+		"fraction, frame, visible scene, drawn scene, camera_t\n", pace_count < PACE_HISTORY ? pace_count : PACE_HISTORY);
+	long first = pace_count < PACE_HISTORY ? 0 : pace_count - PACE_HISTORY;
+	double start = pace_history[first % PACE_HISTORY].time;   /* the clock counts from the Mac's start */
+	for (long n = first; n < pace_count; n++) {
+		const pace_t *p = &pace_history[n % PACE_HISTORY];
+		fprintf(file, "%.4f %.2f %d %.3f %ld %d %d %.3f\n", p->time - start, p->interval * 1000, p->frames_run, p->fraction,
+			p->frame, p->visible_scene, p->drawn_scene, p->camera_t);
+	}
+	fclose(file);
+}
+
+/* A frame's triangles as hle_draw gives them to the GPU for a w x h image, one vertex a line */
+static void write_triangles(const char *path, const hle_frame_t *frame, int w, int h)
+{
+	float expand = expand_for_width(w);
+	int count = hle_triangles(frame, hle_vertices, expand);
+	FILE *file = fopen(path, "w");
+	if (!file)
+		return;
+	fprintf(file, "# %d triangles for a %dx%d image of %d console columns (%d added on the left), "
+		"expand %g, camera_t %g, 3D lines %d-%d, HUD from polygon %d of %d\n", count / 3, w, h, picture_width(),
+		picture_side(), expand, frame->camera_t, frame->view_top, frame->view_bottom, frame->hud_first, frame->count);
+	fprintf(file, "# x y (console pixels from the top left of the 4:3 picture) depth palette_index dithered\n");
+	for (int i = 0; i < count; i++) {
+		const hle_vertex_t *v = &hle_vertices[i];
+		fprintf(file, "%.3f %.3f %.3f %u %u\n", v->x, v->y, v->depth, v->index, v->dithered);
+	}
+	fclose(file);
+}
+
+/* A frame's polygon list as the HLE built it, one polygon a line: both sets of vertices,
+   the SH2s' integers and the exact ones, which should lie within a pixel or so of each
+   other (relative to the screen centre, y up) */
+static void write_polygons(const char *path, const hle_frame_t *frame)
+{
+	FILE *file = fopen(path, "w");
+	if (!file)
+		return;
+	fprintf(file, "# %d polygons, HUD from %d, camera_t %g, command %d, scene %d\n", frame->count, frame->hud_first,
+		frame->camera_t, frame->command, frame->scene);
+	fprintf(file, "# n colour drawn_with corners, then for each corner: x y fx fy depth\n");
+	for (int i = 0; i < frame->count; i++) {
+		const hle_polygon_t *p = &frame->polygons[i];
+		fprintf(file, "%d %04x %d %d", i, p->colour, p->drawn_with, p->vertex_count);
+		for (int n = 0; n < p->vertex_count; n++)
+			fprintf(file, "  %d %d %.3f %.3f %.3f", p->x[n], p->y[n], p->fx[n], p->fy[n], p->depth[n]);
+		fprintf(file, "\n");
+	}
+	fclose(file);
+}
+
+/* The core's own frame, the SH2s' 3D in it: what the HLE's picture should look like */
+static void write_core_frame(const char *path)
+{
+	int w = frame_width(), h = frame_height();
+	unsigned char *rgba = malloc((size_t)w * h * 4);
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++) {
+			uint16_t pixel = core_screen[(core_visible_top + y) * CORE_SCREEN_WIDTH + x];
+			unsigned char *out = &rgba[((size_t)(h - 1 - y) * w + x) * 4];   /* write_ppm's rows go bottom-up */
+			out[0] = (pixel >> 11) * 255 / 31;
+			out[1] = ((pixel >> 5) & 63) * 255 / 63;
+			out[2] = (pixel & 31) * 255 / 31;
+		}
+	write_ppm(path, w, h, rgba);
+	free(rgba);
+}
+
+/* The HLE's 3D image of the last picture (linear light, premultiplied) as sRGB on black.
+   Its row 0 is the top line, so the rows are turned over for write_ppm. */
+static void write_hle_image(const char *path)
+{
+	int w = drawn_3d_w, h = drawn_3d_h;
+	size_t row = (size_t)w * 4;
+	float *colour = malloc(row * h * sizeof(float));
+	unsigned char *rgba = malloc(row * h);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, hle_colour_framebuffer);
+	glReadBuffer(GL_COLOR_ATTACHMENT0);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_FLOAT, colour);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	for (int y = 0; y < h; y++)
+		for (size_t i = 0; i < row; i++) {
+			float c = fminf(fmaxf(colour[y * row + i], 0), 1);
+			rgba[(h - 1 - y) * row + i] = (unsigned char)lroundf(powf(c, 1 / 2.2f) * 255);
+		}
+	write_ppm(path, w, h, rgba);
+	free(rgba);
+	free(colour);
+}
+
+/* The picture on screen: the back buffer, drawn but not yet shown */
+static void write_screen(const char *path, int w, int h)
+{
+	unsigned char *rgba = malloc((size_t)w * h * 4);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+	write_ppm(path, w, h, rgba);
+	free(rgba);
+}
+
+/* "label: text" with the home folder written as ~: paths would otherwise carry the
+   player's user name into a bug report */
+static void print_without_home(FILE *file, const char *label, const char *text)
+{
+	const char *home = getenv("HOME");
+	if (home == NULL)
+		home = getenv("USERPROFILE");     /* Windows */
+	size_t home_length = home ? strlen(home) : 0;
+	fprintf(file, "%s: ", label);
+	while (*text) {
+		if (home_length > 1 && strncmp(text, home, home_length) == 0) {
+			fputc('~', file);
+			text += home_length;
+		} else {
+			fputc(*text++, file);
+		}
+	}
+	fputc('\n', file);
+}
+
+#ifdef __APPLE__
+static void print_sysctl(FILE *file, const char *name)
+{
+	char value[256] = "?";
+	size_t size = sizeof(value);
+	sysctlbyname(name, value, &size, NULL, 0);
+	fprintf(file, "%s: %s\n", name, value);
+}
+#endif
+
+/* The system, OpenGL (and its errors), outside settings and libraries, displays, window,
+   timing and settings */
+static void write_debug_info(const char *path, SDL_Window *window, int w, int h)
+{
+	FILE *file = fopen(path, "w");
+	if (!file)
+		return;
+	fprintf(file, "%s\n", TITLE);
+#ifdef __APPLE__
+	print_sysctl(file, "kern.osproductversion");
+	print_sysctl(file, "kern.osversion");
+	print_sysctl(file, "hw.model");
+	print_sysctl(file, "machdep.cpu.brand_string");
+#endif
+	SDL_version compiled, linked;
+	SDL_VERSION(&compiled);
+	SDL_GetVersion(&linked);
+	fprintf(file, "SDL %d.%d.%d (built with %d.%d.%d), video driver %s\n", linked.major, linked.minor, linked.patch,
+		compiled.major, compiled.minor, compiled.patch, SDL_GetCurrentVideoDriver());
+
+	fprintf(file, "OpenGL: %s (%s), vendor %s, GLSL %s\n", (const char *)glGetString(GL_RENDERER),
+		(const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_VENDOR),
+		(const char *)glGetString(GL_SHADING_LANGUAGE_VERSION));
+	GLint viewport_dims[2] = { 0, 0 }, texture_size = 0;
+	glGetIntegerv(GL_MAX_VIEWPORT_DIMS, viewport_dims);
+	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &texture_size);
+	fprintf(file, "largest viewport %dx%d, texture %d, MSAA samples %d\n", viewport_dims[0], viewport_dims[1],
+		texture_size, msaa_samples);
+	/* errors since the last call to glGetError, here since the start: none expected */
+	fprintf(file, "OpenGL errors:");
+	GLenum error;
+	for (int i = 0; i < 8 && (error = glGetError()) != GL_NO_ERROR; i++)
+		fprintf(file, " 0x%04x", error);
+	fprintf(file, "\n");
+
+	/* settings of the graphics libraries made outside vrde (Metal's HUD, MoltenVK, SDL,
+	   libraries slipped in) */
+	static const char *const prefixes[] = { "MTL_", "MVK_", "SDL_", "DYLD_" };
+	for (char **variable = process_environment; *variable; variable++)
+		for (int i = 0; i < (int)(sizeof(prefixes) / sizeof(prefixes[0])); i++)
+			if (strncmp(*variable, prefixes[i], strlen(prefixes[i])) == 0)
+				print_without_home(file, "environment", *variable);
+#ifdef __APPLE__
+	/* libraries loaded from outside the system: vrde itself, and anything else is news */
+	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+		const char *image = _dyld_get_image_name(i);
+		if (strncmp(image, "/System/", 8) != 0 && strncmp(image, "/usr/lib/", 9) != 0)
+			print_without_home(file, "library", image);
+	}
+#endif
+
+	for (int i = 0; i < SDL_GetNumVideoDisplays(); i++) {
+		SDL_DisplayMode desktop = { 0 }, current = { 0 };
+		SDL_Rect bounds = { 0 };
+		float dpi = 0;
+		SDL_GetDesktopDisplayMode(i, &desktop);
+		SDL_GetCurrentDisplayMode(i, &current);
+		SDL_GetDisplayBounds(i, &bounds);
+		SDL_GetDisplayDPI(i, &dpi, NULL, NULL);
+		fprintf(file, "display %d: %s, %dx%d at %d,%d, desktop %dx%d %d Hz, current %dx%d %d Hz, %.0f dpi\n", i,
+			SDL_GetDisplayName(i), bounds.w, bounds.h, bounds.x, bounds.y, desktop.w, desktop.h,
+			desktop.refresh_rate, current.w, current.h, current.refresh_rate, dpi);
+	}
+	int window_w, window_h;
+	SDL_GetWindowSize(window, &window_w, &window_h);
+	fprintf(file, "window on display %d, %dx%d, picture %dx%d, fullscreen %s\n", SDL_GetWindowDisplayIndex(window),
+		window_w, window_h, w, h, SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN ? "yes" : "no");
+	fprintf(file, "3D %dx%d\n", drawn_3d_w, drawn_3d_h);
+	fprintf(file, "display %.2f Hz: %s; last second %.1f fps, game %.1f\n", display_hz, pacing, title_fps,
+		title_game_fps);
+	fprintf(file, "frames emulated %ld, race pictures %ld\n", emulated_frames, race_pictures);
+
+	for (int i = 0; i < SETTING_COUNT; i++)
+		fprintf(file, "%s = %d\n", settings[i].name, *settings[i].value);
+	fclose(file);
+}
+
+/* Key G (debug_capture_requested), after the picture is drawn and before it is shown */
+static void debug_capture(SDL_Window *window, int w, int h)
+{
+	/* a new folder each time: -2, -3, ... when one is there already (the frames start from 0
+	   again on the next run, and stand still while paused) */
+	char name[48], folder[1100], path[1200];
+	for (int copy = 1; copy < 100; copy++) {
+		if (copy == 1)
+			snprintf(name, sizeof(name), "vrde-debug-%06ld", emulated_frames);
+		else
+			snprintf(name, sizeof(name), "vrde-debug-%06ld-%d", emulated_frames, copy);
+		snprintf(folder, sizeof(folder), "%s", data_path(name));
+		if (make_folder(folder) == 0)
+			break;
+	}
+
+	snprintf(path, sizeof(path), "%s/screen.ppm", folder);
+	write_screen(path, w, h);
+	snprintf(path, sizeof(path), "%s/sh2.ppm", folder);
+	write_core_frame(path);
+	snprintf(path, sizeof(path), "%s/info.txt", folder);
+	write_debug_info(path, window, w, h);
+	snprintf(path, sizeof(path), "%s/pace.txt", folder);
+	write_pace(path);
+	if (drawn_hle) {
+		snprintf(path, sizeof(path), "%s/hle.ppm", folder);
+		write_hle_image(path);
+		snprintf(path, sizeof(path), "%s/triangles.txt", folder);
+		write_triangles(path, drawn_hle, drawn_3d_w, drawn_3d_h);
+		snprintf(path, sizeof(path), "%s/polygons.txt", folder);
+		write_polygons(path, drawn_hle);
+	}
+	if (hle_visible) {
+		snprintf(path, sizeof(path), "%s/triangles_tick.txt", folder);
+		write_triangles(path, hle_visible, drawn_3d_w ? drawn_3d_w : picture_width(),
+			drawn_3d_h ? drawn_3d_h : HLE_IMAGE_HEIGHT);
+		snprintf(path, sizeof(path), "%s/polygons_tick.txt", folder);
+		write_polygons(path, hle_visible);
+	}
+	printf("debug info written to %s\n", folder);
+	show_notice("Debug info saved");
+}
+
 /* Opening the menu reads vrde.ini again and applies it, so that it can be edited while the
    game runs (the settings only there too: the far view's distance and window, the haze) */
 static void reload_settings(SDL_Window *window)
@@ -2867,6 +3206,8 @@ static int handle_key(SDL_Window *window, SDL_Scancode key)
 		save_state();
 	else if (key == SDL_SCANCODE_P)
 		load_state(STATE_FILE);
+	else if (key == SDL_SCANCODE_G && debug_capture_key)
+		debug_capture_requested = 1;
 	return 1;
 }
 
@@ -2934,7 +3275,33 @@ static int handle_events(SDL_Window *window)
 
 static void print_usage(const char *program)
 {
-	fprintf(stderr, "usage: %s [-v] [-d N [-t F] [-r R] [-f] [-b]] [-l state] [-p frame:keys]... [-o file] rom.32x\n", program);
+	fprintf(stderr, "usage: %s [-v] [-g] [-d N [-t F] [-r R] [-f] [-b]] [-l state] [-p frame:keys]... [-o file] [rom.32x]\n", program);
+	fprintf(stderr, "without a ROM, the first .32x file beside the program is played\n");
+}
+
+/* Started without a ROM (double-clicked), the first .32x file in the program's own folder,
+   by name. The program's folder, not the current directory: double-clicked on macOS, the
+   current directory is the home folder. NULL if there is none. */
+static const char *find_rom_beside_program(void)
+{
+	static char path[1024];
+	char *base = SDL_GetBasePath();       /* ends in a separator */
+	if (!base)
+		return NULL;
+	DIR *folder = opendir(base);
+	char best[256] = "";
+	struct dirent *entry;
+	while (folder && (entry = readdir(folder)) != NULL) {
+		size_t length = strlen(entry->d_name);
+		int is_rom = length > 4 && SDL_strcasecmp(entry->d_name + length - 4, ".32x") == 0;
+		if (is_rom && (best[0] == 0 || strcmp(entry->d_name, best) < 0))
+			snprintf(best, sizeof best, "%s", entry->d_name);
+	}
+	if (folder)
+		closedir(folder);
+	snprintf(path, sizeof path, "%s%s", base, best);
+	SDL_free(base);
+	return best[0] ? path : NULL;
 }
 
 /* The OpenGL 3.3 core window (hidden for -d) */
@@ -2961,6 +3328,24 @@ static SDL_Window *open_window(int hidden)
 	return window;
 }
 
+/* The ROM the HLE's built-in addresses (sine table, models) are those of: Virtua Racing
+   Deluxe (USA). With another one the game's data lies elsewhere and the HLE's 3D comes out
+   garbled, so it is refused, in a dialog: started by dragging the ROM onto vrde, there is
+   no terminal to read. */
+#define SUPPORTED_ROM_CRC32 0x7896B62E
+
+static int supported_rom(SDL_Window *window)
+{
+	uint32_t crc = core_rom_crc32();
+	if (crc == SUPPORTED_ROM_CRC32)
+		return 1;
+	char message[100];
+	snprintf(message, sizeof message, "Unsupported ROM. Expected CRC32: %08x", SUPPORTED_ROM_CRC32);
+	fprintf(stderr, "%s (this one: %08x)\n", message, crc);
+	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Virtua Racing Deluxe Enhanced", message, window);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	int dump_frame = -1;
@@ -2982,7 +3367,7 @@ int main(int argc, char **argv)
 
 	int option;
 	const char *record_path = NULL;
-	while ((option = getopt(argc, argv, "bd:fl:o:p:r:t:v")) != -1) {
+	while ((option = getopt(argc, argv, "bd:fgl:o:p:r:t:v")) != -1) {
 		char letters[16] = "";
 		if (option == 'v') {
 			puts(TITLE);
@@ -2999,6 +3384,8 @@ int main(int argc, char **argv)
 			picture_scale = atoi(optarg);
 		} else if (option == 'f') {
 			exact_check = 1;
+		} else if (option == 'g') {
+			debug_capture_key = 1;
 		} else if (option == 'b') {
 			played_colours = 1;
 		} else if (option == 'p' && script_length < MAX_SCRIPT
@@ -3010,11 +3397,18 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	}
-	if (optind != argc - 1) {
+	if (optind < argc - 1) {
 		print_usage(argv[0]);
 		return 1;
 	}
-	const char *rom = argv[optind];
+	const char *rom = optind == argc ? find_rom_beside_program() : argv[optind];
+	if (!rom) {
+		print_usage(argv[0]);
+		/* double-clicked, there is no terminal to read */
+		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Virtua Racing Deluxe Enhanced",
+			"ROM not found. Please place the ROM file in the same folder to play.", NULL);
+		return 1;
+	}
 	int checking = dump_frame >= 0;
 	if (checking) {
 		resolution = 1;      /* the checks compare at the console's resolution */
@@ -3052,7 +3446,13 @@ int main(int argc, char **argv)
 	if (under_gamescope)
 		set_fullscreen(window, 1);
 
-	if (core_init(rom, SAMPLE_RATE) != 0)
+	if (core_init(rom, SAMPLE_RATE) != 0) {
+		if (!checking)
+			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Virtua Racing Deluxe Enhanced",
+				"Cannot load the ROM.", window);
+		return 1;
+	}
+	if (!checking && !supported_rom(window))
 		return 1;
 	/* the analog controls in their dead zones leave the game as it is; the checks run without
 	   them */
@@ -3105,9 +3505,9 @@ int main(int argc, char **argv)
 		fps = NTSC_FPS;
 	}
 	printf("OpenGL: %s (%s)\n", (const char *)glGetString(GL_RENDERER), (const char *)glGetString(GL_VERSION));
-	printf("display %.2f Hz: %s, emulating at %.3f fps\n", hz,
-		frames_per_vsync == 1 ? "1 frame per vsync" : frames_per_vsync == 2 ? "1 frame every 2 vsyncs" : "time-based",
-		fps);
+	display_hz = hz;
+	pacing = frames_per_vsync == 1 ? "1 frame per vsync" : frames_per_vsync == 2 ? "1 frame every 2 vsyncs" : "time-based";
+	printf("display %.2f Hz: %s, emulating at %.3f fps\n", hz, pacing, fps);
 	open_audio();
 
 	double refresh_period = 1.0 / hz;  /* as measured at start (a median: steady under jitter) */
@@ -3182,6 +3582,11 @@ int main(int argc, char **argv)
 		if (!menu.open)
 			fraction = frame_fraction(frames_per_vsync, periods, next_frame_period, time_accumulator * fps);
 		draw(w, h, fraction);
+		remember_pace(last_interval, frames_to_run, fraction);
+		if (debug_capture_requested) {
+			debug_capture(window, w, h);
+			debug_capture_requested = 0;
+		}
 		if (menu.open)
 			draw_menu(w, h);
 		draw_debug_info(w, h);

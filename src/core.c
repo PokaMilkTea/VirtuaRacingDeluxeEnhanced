@@ -14,6 +14,7 @@
 #endif
 
 #include <stdlib.h>
+#include <zlib.h>
 
 #include "pico/pico_int.h"
 #include "platform/common/input_pico.h"
@@ -176,6 +177,15 @@ int core_init(const char *rom_path, int sample_rate)
 	set_up_sound();
 	emu_32x_startup();
 	return 0;
+}
+
+uint32_t core_rom_crc32(void)
+{
+	/* PicoDrive keeps the ROM byte-swapped: swapped back for the sum, as its own rom_crc32 */
+	Byteswap(Pico.rom, Pico.rom, Pico.romsize);
+	uint32_t crc = crc32(0, Pico.rom, Pico.romsize);
+	Byteswap(Pico.rom, Pico.rom, Pico.romsize);
+	return crc;
 }
 
 void core_run_frame(uint16_t buttons)

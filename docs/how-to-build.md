@@ -13,6 +13,15 @@ make                      # build/vrde (the game), build/vrdetrace (headless tra
 ./build/vrde "path/to/Virtua Racing Deluxe (USA).32x"
 ```
 
+The release instead links SDL2 into `vrde`, so players need not install it:
+
+```sh
+make mac                  # build/mac/vrde
+```
+
+- The first `make mac` runs `make mac-deps`, which downloads the [SDL2 2.32.10](https://github.com/libsdl-org/SDL/releases/tag/release-2.32.10) source into `deps/` and builds it as a static library for macOS 11 and later.
+- `build/mac/vrde` runs by itself; it uses only libraries that come with macOS.
+
 ## Windows
 
 `vrde.exe` is cross-compiled on a Mac:

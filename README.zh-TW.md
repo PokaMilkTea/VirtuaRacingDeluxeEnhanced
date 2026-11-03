@@ -48,19 +48,20 @@
 ### macOS
 
 - 需搭載 Apple Silicon（M1 以後晶片）的 Mac。
-- 需要先用 [Homebrew](https://brew.sh) 安裝 SDL2：`brew install sdl2`
 - 在終端機裡，到 `vrde` 所在的資料夾執行：
 
   ```sh
   ./vrde "Virtua Racing Deluxe (USA).32x"
   ```
 
+- 也可以把 ROM 放在 `vrde` 所在的資料夾，直接雙擊 `vrde` 來啟動。
+
 - 程式沒有數位簽章，macOS 可能會顯示「無法驗證開發者」而擋下來。到「系統設定 → 隱私權與安全性」，選擇「強制打開」即可。
 
 ### Windows
 
 - 需要 64 位元的 Windows 10 以上。
-- `vrde.exe` 和 `SDL2.dll` 放在同一個資料夾，把 ROM 檔拖到 `vrde.exe` 上就會啟動。
+- `vrde.exe` 和 `SDL2.dll` 放在同一個資料夾，把 ROM 檔拖到 `vrde.exe` 上就會啟動。也可以把 ROM 放在同一個資料夾，直接雙擊 `vrde.exe` 來啟動。
 - 程式沒有數位簽章，第一次執行時可能會被擋下，可選擇「其他資訊」→「仍要執行」來強制開啟遊戲。
 
 ### Linux

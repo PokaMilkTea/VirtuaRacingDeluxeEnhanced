@@ -27,6 +27,9 @@ extern int core_audio_frame_count;
    Returns 0 on success; on failure prints the reason and returns -1. */
 int core_init(const char *rom_path, int sample_rate);
 
+/* CRC32 of the loaded ROM, as of its file */
+uint32_t core_rom_crc32(void);
+
 /* Runs one frame (1/60 s) with player 1 holding the given buttons.
    Each button is one bit: 1 << GBTN_* from platform/common/input_pico.h. */
 void core_run_frame(uint16_t buttons);

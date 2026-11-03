@@ -48,19 +48,20 @@ If you prefer to build the executable yourself rather than use the prebuilt bina
 ### macOS
 
 - Requires an Apple Silicon Mac (M1 or later).
-- Install SDL2 using [Homebrew](https://brew.sh): `brew install sdl2`
 - Open Terminal, navigate to the folder containing `vrde`, and run:
 
   ```sh
   ./vrde "Virtua Racing Deluxe (USA).32x"
   ```
 
+- Or put the ROM in the same folder as `vrde` and double-click `vrde` to launch.
+
 - The program is unsigned, so macOS may block it. Go to System Settings → Privacy & Security and select "Open Anyway".
 
 ### Windows
 
 - Requires 64-bit Windows 10 or later.
-- Keep `vrde.exe` and `SDL2.dll` in the same folder, and drag the ROM file onto `vrde.exe` to start.
+- Keep `vrde.exe` and `SDL2.dll` in the same folder, and drag the ROM file onto `vrde.exe` to start. Or put the ROM in the same folder and double-click `vrde.exe` to launch.
 - The executable is unsigned and Windows may block it. Select "More info" → "Run anyway".
 
 ### Linux

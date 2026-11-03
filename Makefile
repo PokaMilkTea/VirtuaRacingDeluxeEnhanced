@@ -1,6 +1,7 @@
 # Builds our programs on top of the PicoDrive emulator core.
 #
 #   make          build everything into build/
+#   make mac      vrde for the macOS release, SDL2 linked in (build/mac/)
 #   make win      vrde.exe for Windows, cross-compiled (build/win/; see "Windows" below)
 #   make test     self-checks of logic the -d checks do not cover
 #   make clean    remove build/
@@ -83,6 +84,30 @@ analogtest: tools/analogtest.c src/analog.c src/analog.h src/m68kpatch.c src/m68
 build/sh2dis: tools/sh2dis.c $(PICO)/cpu/sh2/mame/sh2dasm.c
 	$(CC) $(CFLAGS) -I$(PICO) $^ -o $@
 
+# ---- macOS release: vrde with SDL2 linked in statically, so players need not install
+# anything and Gatekeeper asks once (a bundled SDL2.framework is asked about separately).
+# Same SDL version as the Windows build, built from SDL's source for macOS 11 and later,
+# unlike Homebrew's SDL2 (built for the Mac it runs on). mac-deps downloads and builds
+# it into deps/ the first time.
+SDL2_SRC = SDL2-2.32.10
+MAC_SDL  = $(CURDIR)/deps/sdl2-mac
+
+mac: build/mac/vrde
+
+mac-deps:
+	@mkdir -p deps
+	[ -d deps/$(SDL2_SRC) ] || (curl -L https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/$(SDL2_SRC).tar.gz \
+		| tar xz -C deps)
+	[ -f $(MAC_SDL)/lib/libSDL2.a ] || (mkdir -p deps/sdl2-mac-build && cd deps/sdl2-mac-build \
+		&& ../$(SDL2_SRC)/configure --prefix=$(MAC_SDL) --disable-shared --enable-static \
+			CFLAGS="-O2 -mmacosx-version-min=11.0" LDFLAGS="-mmacosx-version-min=11.0" \
+		&& $(MAKE) && $(MAKE) install)
+
+build/mac/vrde: $(VRDE_SOURCES) $(VRDE_HEADERS) $(HLE_SOURCES) $(OUR_COMMON) $(CORE_OBJECTS) | mac-deps
+	@mkdir -p build/mac
+	$(CC) $(OUR_CFLAGS) $$($(MAC_SDL)/bin/sdl2-config --cflags) $(filter %.c %.o,$^) \
+		$$($(MAC_SDL)/bin/sdl2-config --static-libs) $(GL_LIBS) -lz -o $@
+
 # ---- Windows: vrde.exe cross-compiled with llvm-mingw against SDL2's MinGW development
 # files, as the MD version is; zlib from its own source (the core reads zipped ROMs and
 # writes compressed states with it). All three are downloaded into deps/ by win-deps.
@@ -137,4 +162,4 @@ clean:
 
 -include $(CORE_OBJECTS:.o=.d) $(WIN_CORE_OBJECTS:.o=.d)
 
-.PHONY: analogtest all clean test win win-deps
+.PHONY: analogtest all clean mac mac-deps test win win-deps
